@@ -36,6 +36,7 @@ extern "C" {
 
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 /* ── opaque handles ──────────────────────────────────────────────────────── */
 typedef struct hs_server   hs_server_t;
@@ -112,6 +113,55 @@ void hs_res_header(hs_response_t *res, const char *name, const char *value);
 void hs_res_body(hs_response_t *res, const char *data, size_t len);
 void hs_res_body_str(hs_response_t *res, const char *str);
 void hs_res_send(hs_response_t *res);   /* MUST be called exactly once     */
+
+/* ── logging ────────────────────────────────────────────────────────────── */
+typedef enum {
+    HS_LOG_DEBUG = 0,
+    HS_LOG_INFO  = 1,
+    HS_LOG_WARN  = 2,
+    HS_LOG_ERROR = 3,
+    HS_LOG_FATAL = 4,
+    HS_LOG_OFF   = 5     /* disable all output */
+} hs_log_level_t;
+
+typedef struct {
+    hs_log_level_t  level;
+    const char     *file;       /* source file  (__FILE__)          */
+    int             line;       /* source line  (__LINE__)          */
+    const char     *msg;        /* formatted message                */
+    struct timespec ts;         /* CLOCK_REALTIME, ns precision     */
+    unsigned long   tid;        /* OS thread id                     */
+} hs_log_event_t;
+
+typedef void (*hs_log_cb)(const hs_log_event_t *ev, void *user_data);
+
+/**
+ * Register a log callback.  Pass NULL to restore the default stderr logger.
+ * Thread-safe (atomic store).
+ */
+void hs_log_register(hs_log_cb cb, void *user_data);
+
+/**
+ * Set the minimum log level.  Messages below this level are dropped
+ * before any formatting work is done.  Default: HS_LOG_INFO.
+ * Thread-safe (atomic store).
+ */
+void hs_log_set_level(hs_log_level_t level);
+
+/**
+ * hs_log() is a macro that captures __FILE__ and __LINE__.
+ * Usage:  hs_log(HS_LOG_INFO, "listening on %s:%d", host, port);
+ */
+void hs_log_impl(hs_log_level_t level,
+                 const char *file, int line,
+                 const char *fmt, ...)
+#ifdef __GNUC__
+    __attribute__((format(printf, 4, 5)))
+#endif
+;
+
+#define hs_log(level, ...) \
+    hs_log_impl((level), __FUNCTION__, __LINE__, __VA_ARGS__)
 
 #ifdef __cplusplus
 }

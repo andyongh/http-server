@@ -15,6 +15,7 @@
 #include <arpa/inet.h>
 
 #include "hs_listener.h"
+#include "hs_log.h"
 
 #ifndef SOCK_CLOEXEC
 #define SOCK_CLOEXEC 0
@@ -39,7 +40,7 @@ int hs_listener_tcp(hs_listener_t *l, const char *host, uint16_t port,
                     int backlog)
 {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) { perror("socket(TCP)"); return -1; }
+    if (fd < 0) { hs_log(HS_LOG_ERROR, "socket(TCP): %s", strerror(errno)); return -1; }
     set_cloexec(fd);
 
     /* SO_REUSEADDR: allow immediate rebind after restart */
@@ -59,15 +60,15 @@ int hs_listener_tcp(hs_listener_t *l, const char *host, uint16_t port,
     };
     const char *h = (host && *host) ? host : "0.0.0.0";
     if (inet_pton(AF_INET, h, &addr.sin_addr) <= 0) {
-        fprintf(stderr, "hs_listener_tcp: bad host \"%s\"\n", h);
+        hs_log(HS_LOG_ERROR, "hs_listener_tcp: bad host \"%s\"", h);
         close(fd); return -1;
     }
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("bind(TCP)"); close(fd); return -1;
+        hs_log(HS_LOG_ERROR, "bind(TCP): %s", strerror(errno)); close(fd); return -1;
     }
     if (listen(fd, backlog) < 0) {
-        perror("listen(TCP)"); close(fd); return -1;
+        hs_log(HS_LOG_ERROR, "listen(TCP): %s", strerror(errno)); close(fd); return -1;
     }
 
     l->fd    = fd;
@@ -80,7 +81,7 @@ int hs_listener_tcp(hs_listener_t *l, const char *host, uint16_t port,
 int hs_listener_uds(hs_listener_t *l, const char *path, int backlog)
 {
     if (!path || !*path) {
-        fprintf(stderr, "hs_listener_uds: empty path\n");
+        hs_log(HS_LOG_ERROR, "hs_listener_uds: empty path");
         return -1;
     }
 
@@ -88,7 +89,7 @@ int hs_listener_uds(hs_listener_t *l, const char *path, int backlog)
     unlink(path);
 
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) { perror("socket(UDS)"); return -1; }
+    if (fd < 0) { hs_log(HS_LOG_ERROR, "socket(UDS): %s", strerror(errno)); return -1; }
     set_cloexec(fd);
 
     set_nonblocking(fd);
@@ -97,16 +98,16 @@ int hs_listener_uds(hs_listener_t *l, const char *path, int backlog)
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     if (strlen(path) >= sizeof(addr.sun_path)) {
-        fprintf(stderr, "hs_listener_uds: path too long: %s\n", path);
+        hs_log(HS_LOG_ERROR, "hs_listener_uds: path too long: %s", path);
         close(fd); return -1;
     }
     strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("bind(UDS)"); close(fd); return -1;
+        hs_log(HS_LOG_ERROR, "bind(UDS): %s", strerror(errno)); close(fd); return -1;
     }
     if (listen(fd, backlog) < 0) {
-        perror("listen(UDS)"); close(fd); return -1;
+        hs_log(HS_LOG_ERROR, "listen(UDS): %s", strerror(errno)); close(fd); return -1;
     }
 
     l->fd    = fd;

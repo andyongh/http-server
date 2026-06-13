@@ -76,6 +76,7 @@ static int hs_accept(int lfd) {
 #include "hs_http.h"
 #include "hs_pool.h"
 #include "hs_lua.h"
+#include "hs_log.h"
 
 /* ── socket helpers ─────────────────────────────────────────────────────── */
 static void set_nonblocking(int fd)
@@ -158,8 +159,7 @@ static void sub_register_conn(hs_sub_reactor_t *sub, int cfd)
     set_nonblocking(cfd);
     set_tcp_nodelay(cfd);   /* harmless NOP for UDS */
 
-    fprintf(stderr, "[accept %d]", cfd);
-    fflush(stderr);
+    hs_log(HS_LOG_DEBUG, "accept fd=%d", cfd);
 
     hs_conn_t *conn = hs_conn_pool_alloc(&sub->conn_pool);
     if (!conn) {
@@ -175,8 +175,7 @@ static void sub_register_conn(hs_sub_reactor_t *sub, int cfd)
 
     hs_conn_init(conn, cfd, sub);
     if (aeCreateFileEvent(sub->ae, cfd, AE_READABLE, hs_read_cb, conn) == AE_ERR) {
-        fprintf(stderr, "[register failed %d: %d (%s)]", cfd, errno, strerror(errno));
-        fflush(stderr);
+        hs_log(HS_LOG_ERROR, "register failed fd=%d: %d (%s)", cfd, errno, strerror(errno));
     }
 }
 
@@ -235,13 +234,11 @@ void hs_read_cb(aeEventLoop *el, int fd, void *clientData, int mask)
     hs_conn_t        *conn = (hs_conn_t *)clientData;
     hs_sub_reactor_t *sub  = conn->sub;
 
-    fprintf(stderr, "[read_cb fd=%d state=%d ring_len=%d]", fd, conn->state, hs_ring_len(&conn->ring));
-    fflush(stderr);
+    hs_log(HS_LOG_DEBUG, "read_cb fd=%d state=%d ring_len=%d", fd, conn->state, hs_ring_len(&conn->ring));
 
     hs_feed_result_t res = hs_conn_recv_and_feed(conn);
 
-    fprintf(stderr, "[read_cb_ret fd=%d res=%d state=%d ring_len=%d]", fd, res, conn->state, hs_ring_len(&conn->ring));
-    fflush(stderr);
+    hs_log(HS_LOG_DEBUG, "read_cb_ret fd=%d res=%d state=%d ring_len=%d", fd, res, conn->state, hs_ring_len(&conn->ring));
 
     switch (res) {
     case HS_FEED_OK:
@@ -305,8 +302,7 @@ static void resp_efd_cb(aeEventLoop *el, int fd, void *clientData, int mask)
         if (!node) break;
 
         hs_response_t *res  = (hs_response_t *)node->payload;
-        fprintf(stderr, "[response %d]", res->conn->fd);
-        fflush(stderr);
+        hs_log(HS_LOG_DEBUG, "response fd=%d", res->conn->fd);
         hs_conn_t     *conn = res->conn;
 
         if (conn->state == HS_CONN_CLOSING) {
@@ -405,8 +401,7 @@ __attribute__((weak)) void hs_on_request_complete(hs_conn_t *conn)
     hs_sub_reactor_t *sub = conn->sub;
     hs_server_t      *srv = sub->srv;
 
-    fprintf(stderr, "[complete %d]", conn->fd);
-    fflush(stderr);
+    hs_log(HS_LOG_DEBUG, "complete fd=%d", conn->fd);
 
     hs_work_t *work = (hs_work_t *)je_malloc(sizeof(hs_work_t));
     if (!work) {
@@ -633,12 +628,12 @@ int hs_reactor_group_start(hs_reactor_group_t *rg)
         for (int i = 0; i < rg->nsubs; i++) {
             if (pthread_create(&rg->subs[i].tid, NULL,
                                sub_thread_fn, &rg->subs[i]) != 0) {
-                perror("pthread_create(sub)");
+                hs_log(HS_LOG_ERROR, "pthread_create(sub): %s", strerror(errno));
                 return -1;
             }
         }
         if (pthread_create(&rg->boss_tid, NULL, boss_thread_fn, rg) != 0) {
-            perror("pthread_create(boss)");
+            hs_log(HS_LOG_ERROR, "pthread_create(boss): %s", strerror(errno));
             return -1;
         }
         pthread_join(rg->boss_tid, NULL);

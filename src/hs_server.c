@@ -22,6 +22,7 @@
 #include "hs_listener.h"
 #include "hs_reactor.h"
 #include "httpserver.h"
+#include "hs_log.h"
 
 /* ── hs_config_init ──────────────────────────────────────────────────────── */
 void hs_config_init(hs_config_t *cfg)
@@ -66,25 +67,25 @@ hs_server_t *hs_server_new(const hs_config_t *cfg)
         hs_listener_t *l = &srv->listeners[srv->nlisteners];
         if (hs_listener_tcp(l, cfg->host, cfg->port, cfg->backlog) < 0)
             goto err;
-        fprintf(stderr, "[server] TCP  %s:%d\n",
-                cfg->host ? cfg->host : "0.0.0.0", cfg->port);
+        hs_log(HS_LOG_INFO, "[server] TCP  %s:%d",
+               cfg->host ? cfg->host : "0.0.0.0", cfg->port);
         srv->nlisteners++;
     }
 
     if (cfg->listen_flags & HS_LISTEN_UDS) {
         if (!cfg->uds_path || !*cfg->uds_path) {
-            fprintf(stderr, "[server] HS_LISTEN_UDS set but uds_path is empty\n");
+            hs_log(HS_LOG_ERROR, "[server] HS_LISTEN_UDS set but uds_path is empty");
             goto err;
         }
         hs_listener_t *l = &srv->listeners[srv->nlisteners];
         if (hs_listener_uds(l, cfg->uds_path, cfg->backlog) < 0)
             goto err;
-        fprintf(stderr, "[server] UDS  %s\n", cfg->uds_path);
+        hs_log(HS_LOG_INFO, "[server] UDS  %s", cfg->uds_path);
         srv->nlisteners++;
     }
 
     if (srv->nlisteners == 0) {
-        fprintf(stderr, "[server] No listen flags set\n");
+        hs_log(HS_LOG_ERROR, "[server] No listen flags set");
         goto err;
     }
 
@@ -96,10 +97,10 @@ hs_server_t *hs_server_new(const hs_config_t *cfg)
     srv->pool = hs_pool_new(srv->config.num_threads, srv);
     if (!srv->pool) goto err;
 
-    fprintf(stderr, "[server] mode=%s  io_threads=%d  workers=%d\n",
-            cfg->reactor_mode == HS_REACTOR_MULTI ? "MULTI" : "SINGLE",
-            srv->rg->nsubs,
-            srv->config.num_threads);
+    hs_log(HS_LOG_INFO, "[server] mode=%s  io_threads=%d  workers=%d",
+           cfg->reactor_mode == HS_REACTOR_MULTI ? "MULTI" : "SINGLE",
+           srv->rg->nsubs,
+           srv->config.num_threads);
 
     return srv;
 

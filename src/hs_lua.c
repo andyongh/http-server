@@ -24,6 +24,7 @@
 #include "hs_lua.h"
 #include "hs_conn.h"
 #include "hs_http.h"
+#include "hs_log.h"
 #include "httpserver.h"
 
 struct hs_lua_state { lua_State *L; };
@@ -113,12 +114,12 @@ hs_lua_state_t *hs_lua_state_new(const char *script)
     luaL_openlibs(ls->L);
     reg_types(ls->L);
     if (luaL_loadfile(ls->L, script) || lua_pcall(ls->L, 0, 0, 0)) {
-        fprintf(stderr, "[lua] load error: %s\n", lua_tostring(ls->L, -1));
+        hs_log(HS_LOG_ERROR, "lua load error: %s", lua_tostring(ls->L, -1));
         lua_close(ls->L); je_free(ls); return NULL;
     }
     lua_getglobal(ls->L, "handle");
     if (!lua_isfunction(ls->L, -1)) {
-        fprintf(stderr, "[lua] missing global 'handle'\n");
+        hs_log(HS_LOG_ERROR, "lua missing global 'handle'");
         lua_close(ls->L); je_free(ls); return NULL;
     }
     lua_pop(ls->L, 1);
@@ -145,7 +146,7 @@ int hs_lua_call_handler(hs_lua_state_t *ls,
     luaL_getmetatable(L, MT_RES); lua_setmetatable(L, -2);
 
     if (lua_pcall(L, 2, 0, 0)) {
-        fprintf(stderr, "[lua] runtime error: %s\n", lua_tostring(L, -1));
+        hs_log(HS_LOG_ERROR, "lua runtime error: %s", lua_tostring(L, -1));
         lua_pop(L, 1);
         return -1;
     }

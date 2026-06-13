@@ -30,6 +30,7 @@
 #include <llhttp.h>
 
 #include "hs_conn.h"
+#include "hs_log.h"
 #include "hs_reactor.h"   /* hs_sub_reactor_t, hs_on_request_complete */
 #include "hs_server.h"
 
@@ -460,8 +461,7 @@ hs_feed_result_t hs_conn_recv_and_feed(hs_conn_t *conn)
     }
 
     /* All remaining HPE_* values are syntax errors → 400 */
-    fprintf(stderr,
-            "[conn] fd=%d llhttp error: %s – %s\n",
+    hs_log(HS_LOG_WARN, "fd=%d llhttp error: %s – %s",
             conn->fd,
             llhttp_errno_name(err),
             llhttp_get_error_reason(&conn->parser));

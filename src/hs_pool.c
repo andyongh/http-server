@@ -3,6 +3,8 @@
  */
 #define _GNU_SOURCE
 #include <stdio.h>
+#include <string.h>
+#include <errno.h>
 #include <pthread.h>
 #include <jemalloc/jemalloc.h>
 
@@ -10,6 +12,7 @@
 #include "hs_reactor.h"
 #include "hs_lua.h"
 #include "hs_server.h"
+#include "hs_log.h"
 
 typedef struct {
     int               id;
@@ -32,7 +35,7 @@ static void *worker_fn(void *arg)
     if (srv->config.lua_script) {
         w->lstate = hs_lua_state_new(srv->config.lua_script);
         if (!w->lstate)
-            fprintf(stderr, "[pool] worker %d: Lua init failed\n", w->id);
+            hs_log(HS_LOG_ERROR, "worker %d: Lua init failed", w->id);
     }
 
     for (;;) {
@@ -62,7 +65,7 @@ hs_pool_t *hs_pool_new(int nthreads, struct hs_server *srv)
         p->workers[i].srv = srv;
         if (pthread_create(&p->workers[i].tid, NULL, worker_fn,
                            &p->workers[i]) != 0) {
-            perror("pthread_create(worker)");
+            hs_log(HS_LOG_ERROR, "pthread_create(worker): %s", strerror(errno));
             p->nthreads = i;
             break;
         }
