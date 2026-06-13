@@ -160,6 +160,28 @@ static int cb_body(llhttp_t *p, const char *at, size_t len)
         /* First body byte: record physical index in ring.data */
         r->body_ring_idx = (uint32_t)(at - c->ring.data);
         r->body_in_ring  = 1;
+    } else {
+        /* Check for gap (non-contiguous write, e.g. chunked request) */
+        const char *expected = c->ring.data + ((r->body_ring_idx + r->body_ring_len) % HS_RING_SIZE);
+        if (at != expected) {
+            size_t cap = r->content_length ? r->content_length : r->body_received;
+            if (overflow_ensure(r, cap < r->body_received ? r->body_received : cap) < 0)
+                return HPE_USER;   /* OOM */
+
+            if (r->body_ring_len > 0) {
+                uint32_t idx    = r->body_ring_idx;
+                uint32_t remain = r->body_ring_len;
+                uint32_t to_end = HS_RING_SIZE - idx;
+                uint32_t p1     = remain < to_end ? remain : to_end;
+                memcpy(r->overflow,      c->ring.data + idx, p1);
+                memcpy(r->overflow + p1, c->ring.data,       remain - p1);
+                r->overflow_len = remain;
+            }
+            r->body_in_ring  = 0;
+            r->body_ring_len = 0;
+
+            return overflow_append(r, at, len) == 0 ? HPE_OK : HPE_USER;
+        }
     }
 
     uint32_t new_len = r->body_ring_len + (uint32_t)len;

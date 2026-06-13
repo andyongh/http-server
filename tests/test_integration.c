@@ -30,33 +30,31 @@ static int failures = 0;
     } while (0)
 #define CHECK_EQ(a,b) CHECK((int)(a)==(int)(b))
 
-/* read until '\r\n\r\n' header-end is seen, then read body per Content-Length */
+/* read headers byte-by-byte, then read body exactly according to Content-Length */
 static int recv_response(int fd, char *buf, size_t bufsz)
 {
     size_t got = 0;
+    /* 1. Read headers 1 byte at a time until we see \r\n\r\n */
     while (got < bufsz - 1) {
-        ssize_t n = read(fd, buf + got, bufsz - 1 - got);
+        ssize_t n = read(fd, buf + got, 1);
         if (n <= 0) break;
-        got += (size_t)n;
-        /* Stop once we have the full response (header + body) */
+        got++;
         buf[got] = '\0';
-        char *hdr_end = strstr(buf, "\r\n\r\n");
-        if (hdr_end) {
-            /* Extract Content-Length */
-            char *cl = strcasestr(buf, "Content-Length:");
-            if (cl) {
-                size_t clen = (size_t)atoi(cl + 15);
-                size_t body_start = (size_t)(hdr_end + 4 - buf);
-                size_t body_got   = got - body_start;
-                /* Read remaining body bytes */
-                while (body_got < clen && got < bufsz - 1) {
-                    ssize_t m = read(fd, buf + got, clen - body_got);
-                    if (m <= 0) break;
-                    got += (size_t)m;
-                    body_got += (size_t)m;
-                }
-            }
+        if (got >= 4 && strcmp(buf + got - 4, "\r\n\r\n") == 0) {
             break;
+        }
+    }
+
+    /* 2. Parse Content-Length and read exactly that many bytes */
+    char *cl = strcasestr(buf, "Content-Length:");
+    if (cl) {
+        size_t clen = (size_t)atoi(cl + 15);
+        size_t body_read = 0;
+        while (body_read < clen && got < bufsz - 1) {
+            ssize_t n = read(fd, buf + got, clen - body_read);
+            if (n <= 0) break;
+            got += (size_t)n;
+            body_read += (size_t)n;
         }
     }
     buf[got] = '\0';
