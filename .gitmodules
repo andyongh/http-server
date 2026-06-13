@@ -1,0 +1,16 @@
+[submodule "deps/fsae"]
+	path = deps/fsae
+	url = https://github.com/andyongh/fsae.git
+
+[submodule "deps/llhttp"]
+	path = deps/llhttp
+	url = https://github.com/nodejs/llhttp.git
+
+[submodule "deps/luajit"]
+	path = deps/luajit
+	url = https://github.com/luajit/luajit
+    branch = v2.1
+
+[submodule "deps/jemalloc"]
+	path = deps/jemalloc
+	url = https://github.com/jemalloc/jemalloc
