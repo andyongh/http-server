@@ -46,7 +46,6 @@ static inline void hs_mpsc_push(hs_mpsc_t *q, hs_mpsc_node_t *node)
     atomic_store_explicit(&prev->next, node, memory_order_release);
 }
 
-/** Single-consumer pop.  Returns NULL if empty. */
 static inline hs_mpsc_node_t *hs_mpsc_pop(hs_mpsc_t *q)
 {
     hs_mpsc_node_t *tail = q->tail;
@@ -63,7 +62,17 @@ static inline hs_mpsc_node_t *hs_mpsc_pop(hs_mpsc_t *q)
 
     hs_mpsc_node_t *head =
         atomic_load_explicit(&q->head, memory_order_acquire);
-    if (tail != head) return NULL;
+    if (tail != head) {
+        while ((next = atomic_load_explicit(&tail->next, memory_order_acquire)) == NULL) {
+            #if defined(__x86_64__) || defined(__i386__)
+            __asm__ __volatile__("pause");
+            #elif defined(__arm__) || defined(__aarch64__)
+            __asm__ __volatile__("yield");
+            #endif
+        }
+        q->tail = next;
+        return tail;
+    }
 
     hs_mpsc_push(q, &q->stub);
     next = atomic_load_explicit(&tail->next, memory_order_acquire);

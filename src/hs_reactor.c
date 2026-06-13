@@ -616,6 +616,20 @@ void hs_reactor_group_stop(hs_reactor_group_t *rg)
 {
     hs_server_t *srv = rg->srv;
 
+    /* Close all listener sockets to wake up boss event loop and stop accepts */
+    for (int i = 0; i < srv->nlisteners; i++) {
+        if (srv->listeners[i].fd >= 0) {
+            /* Remove listener from the event loop first to be clean */
+            if (srv->config.reactor_mode == HS_REACTOR_MULTI) {
+                if (rg->boss_ae) aeDeleteFileEvent(rg->boss_ae, srv->listeners[i].fd, AE_READABLE);
+            } else {
+                if (rg->subs[0].ae) aeDeleteFileEvent(rg->subs[0].ae, srv->listeners[i].fd, AE_READABLE);
+            }
+            close(srv->listeners[i].fd);
+            srv->listeners[i].fd = -1;
+        }
+    }
+
     if (srv->config.reactor_mode == HS_REACTOR_MULTI) {
         if (rg->boss_ae) aeStop(rg->boss_ae);
         for (int i = 0; i < rg->nsubs; i++) {
@@ -624,8 +638,15 @@ void hs_reactor_group_stop(hs_reactor_group_t *rg)
                 (void)write(rg->subs[i].wakeup_w, &sentinel, sizeof(int));
         }
     } else {
-        if (rg->nsubs > 0 && rg->subs[0].ae)
+        if (rg->nsubs > 0 && rg->subs[0].ae) {
             aeStop(rg->subs[0].ae);
+            /* Wake up the single reactor thread from poll */
+#ifdef __linux__
+            hs_efd_signal(rg->subs[0].resp_efd, rg->subs[0].resp_efd);
+#else
+            hs_efd_signal(rg->subs[0].resp_efd, rg->subs[0].resp_efd_w);
+#endif
+        }
     }
 }
 
