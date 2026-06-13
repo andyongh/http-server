@@ -319,13 +319,14 @@ static void test_413_streaming(void)
     int len = snprintf(req, sizeof(req),
         "POST /stream HTTP/1.1\r\n"
         "Host: localhost\r\n"
-        "Transfer-Encoding: identity\r\n"
-        "Content-Length: %zu\r\n"   /* still declared, but > max */
-        "\r\n",
-        sizeof(body));
+        "Transfer-Encoding: chunked\r\n"
+        "\r\n"
+        "80\r\n");
     /* append body */
     memcpy(req + len, body, sizeof(body));
-    size_t total = (size_t)len + sizeof(body);
+    len += sizeof(body);
+    int tail_len = snprintf(req + len, sizeof(req) - len, "\r\n0\r\n\r\n");
+    size_t total = (size_t)len + tail_len;
 
     inject_bytes(&conn, &m, req, total);
 

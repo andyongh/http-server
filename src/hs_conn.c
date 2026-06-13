@@ -225,7 +225,7 @@ static int cb_message_complete(llhttp_t *p)
 
     /* Hand to the server – still on the IO thread */
     hs_on_request_complete(c);
-    return HPE_OK;
+    return HPE_PAUSED;
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -407,15 +407,15 @@ hs_feed_result_t hs_conn_recv_and_feed(hs_conn_t *conn)
         return HS_FEED_UPGRADE;
     }
 
-    if (err == HPE_USER) {
-        /*
-         * HPE_USER is returned by our own callbacks.
-         *   body_upgrade == 1 → client sent Upgrade in headers_complete
-         *   body_413     == 1 → body limit exceeded
-         *   otherwise         → OOM in overflow allocation
-         */
-        if (conn->req.body_upgrade) return HS_FEED_UPGRADE;
-        if (conn->req.body_413)     return HS_FEED_TOO_LARGE;
+    if (conn->req.body_upgrade) {
+        return HS_FEED_UPGRADE;
+    }
+    if (conn->req.body_413) {
+        return HS_FEED_TOO_LARGE;
+    }
+
+    if (err == HPE_USER || err == HPE_CB_HEADERS_COMPLETE) {
+        /* Must be OOM in overflow allocation */
         return HS_FEED_OOM;
     }
 
