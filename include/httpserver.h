@@ -161,7 +161,7 @@ void hs_log_impl(hs_log_level_t level,
 ;
 
 #define hs_log(level, ...) \
-    hs_log_impl((level), __FUNCTION__, __LINE__, __VA_ARGS__)
+    hs_log_impl((level), __FILE__, __LINE__, __VA_ARGS__)
 
 #ifdef __cplusplus
 }
