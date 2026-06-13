@@ -158,6 +158,9 @@ static void sub_register_conn(hs_sub_reactor_t *sub, int cfd)
     set_nonblocking(cfd);
     set_tcp_nodelay(cfd);   /* harmless NOP for UDS */
 
+    fprintf(stderr, "[accept %d]", cfd);
+    fflush(stderr);
+
     hs_conn_t *conn = hs_conn_pool_alloc(&sub->conn_pool);
     if (!conn) {
         /* Pool exhausted: immediate 503 */
@@ -171,7 +174,10 @@ static void sub_register_conn(hs_sub_reactor_t *sub, int cfd)
     }
 
     hs_conn_init(conn, cfd, sub);
-    aeCreateFileEvent(sub->ae, cfd, AE_READABLE, hs_read_cb, conn);
+    if (aeCreateFileEvent(sub->ae, cfd, AE_READABLE, hs_read_cb, conn) == AE_ERR) {
+        fprintf(stderr, "[register failed %d: %d (%s)]", cfd, errno, strerror(errno));
+        fflush(stderr);
+    }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -212,6 +218,11 @@ void hs_write_cb(aeEventLoop *el, int fd, void *clientData, int mask)
     hs_conn_reset_req(conn);
     conn->state = HS_CONN_READING;
     aeCreateFileEvent(el, fd, AE_READABLE, hs_read_cb, conn);
+
+    /* If we already have pipelined request bytes in the ring buffer, process them immediately */
+    if (hs_ring_len(&conn->ring) > 0) {
+        hs_read_cb(el, fd, conn, AE_READABLE);
+    }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -220,11 +231,17 @@ void hs_write_cb(aeEventLoop *el, int fd, void *clientData, int mask)
  * ══════════════════════════════════════════════════════════════════════════ */
 void hs_read_cb(aeEventLoop *el, int fd, void *clientData, int mask)
 {
-    (void)el; (void)fd; (void)mask;
+    (void)el; (void)mask;
     hs_conn_t        *conn = (hs_conn_t *)clientData;
     hs_sub_reactor_t *sub  = conn->sub;
 
+    fprintf(stderr, "[read_cb fd=%d state=%d ring_len=%d]", fd, conn->state, hs_ring_len(&conn->ring));
+    fflush(stderr);
+
     hs_feed_result_t res = hs_conn_recv_and_feed(conn);
+
+    fprintf(stderr, "[read_cb_ret fd=%d res=%d state=%d ring_len=%d]", fd, res, conn->state, hs_ring_len(&conn->ring));
+    fflush(stderr);
 
     switch (res) {
     case HS_FEED_OK:
@@ -288,6 +305,8 @@ static void resp_efd_cb(aeEventLoop *el, int fd, void *clientData, int mask)
         if (!node) break;
 
         hs_response_t *res  = (hs_response_t *)node->payload;
+        fprintf(stderr, "[response %d]", res->conn->fd);
+        fflush(stderr);
         hs_conn_t     *conn = res->conn;
 
         if (conn->state == HS_CONN_CLOSING) {
@@ -338,6 +357,14 @@ static void boss_accept_cb(aeEventLoop *el, int fd, void *clientData, int mask)
     }
 }
 
+static void boss_wakeup_cb(aeEventLoop *el, int fd, void *clientData, int mask)
+{
+    (void)mask; (void)clientData;
+    char dummy;
+    (void)read(fd, &dummy, 1);
+    aeStop(el);
+}
+
 /* MULTI mode sub: receives new fd from boss via pipe
  * clientData = hs_sub_reactor_t *
  */
@@ -377,6 +404,9 @@ __attribute__((weak)) void hs_on_request_complete(hs_conn_t *conn)
 {
     hs_sub_reactor_t *sub = conn->sub;
     hs_server_t      *srv = sub->srv;
+
+    fprintf(stderr, "[complete %d]", conn->fd);
+    fflush(stderr);
 
     hs_work_t *work = (hs_work_t *)je_malloc(sizeof(hs_work_t));
     if (!work) {
@@ -497,6 +527,8 @@ hs_reactor_group_t *hs_reactor_group_new(hs_server_t *srv)
     if (!rg) return NULL;
 
     rg->srv = srv;
+    rg->boss_wakeup_r = -1;
+    rg->boss_wakeup_w = -1;
     atomic_init(&rg->rr, 0);
 
     int nsubs = srv->config.num_io_threads;
@@ -563,6 +595,13 @@ hs_reactor_group_t *hs_reactor_group_new(hs_server_t *srv)
     if (srv->config.reactor_mode == HS_REACTOR_MULTI) {
         rg->boss_ae = aeCreateEventLoop(64);
         if (!rg->boss_ae) goto fail;
+
+        int pfd[2];
+        if (hs_pipe_pair(pfd) < 0) goto fail;
+        rg->boss_wakeup_r = pfd[0];
+        rg->boss_wakeup_w = pfd[1];
+        if (aeCreateFileEvent(rg->boss_ae, rg->boss_wakeup_r, AE_READABLE,
+                              boss_wakeup_cb, rg) == AE_ERR) goto fail;
     }
 
     return rg;
@@ -631,7 +670,10 @@ void hs_reactor_group_stop(hs_reactor_group_t *rg)
     }
 
     if (srv->config.reactor_mode == HS_REACTOR_MULTI) {
-        if (rg->boss_ae) aeStop(rg->boss_ae);
+        if (rg->boss_wakeup_w >= 0) {
+            char dummy = 0;
+            (void)write(rg->boss_wakeup_w, &dummy, 1);
+        }
         for (int i = 0; i < rg->nsubs; i++) {
             int sentinel = -1;
             if (rg->subs[i].wakeup_w >= 0)
@@ -664,6 +706,8 @@ void hs_reactor_group_free(hs_reactor_group_t *rg)
         if (sub->wakeup_w >= 0) close(sub->wakeup_w);
         hs_conn_pool_destroy(&sub->conn_pool);
     }
+    if (rg->boss_wakeup_r >= 0) close(rg->boss_wakeup_r);
+    if (rg->boss_wakeup_w >= 0) close(rg->boss_wakeup_w);
     if (rg->boss_ae) aeDeleteEventLoop(rg->boss_ae);
     je_free(rg->subs);
     je_free(rg);

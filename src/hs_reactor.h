@@ -85,6 +85,8 @@ typedef struct {
 
     aeEventLoop      *boss_ae;   /* MULTI mode only; NULL in SINGLE mode    */
     pthread_t         boss_tid;
+    int               boss_wakeup_r;
+    int               boss_wakeup_w;
 
     _Atomic uint32_t  rr;        /* round-robin dispatch counter            */
 

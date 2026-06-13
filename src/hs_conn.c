@@ -317,7 +317,6 @@ void hs_conn_reset_req(hs_conn_t *conn)
     }
     je_free(r->overflow);
     memset(r, 0, sizeof(*r));
-    hs_ring_reset(&conn->ring);
     llhttp_reset(&conn->parser);
 }
 
@@ -346,10 +345,17 @@ hs_feed_result_t hs_conn_recv_and_feed(hs_conn_t *conn)
     /* ── Step 1: receive ── */
     ssize_t rc = hs_ring_recv(&conn->ring, conn->fd);
 
-    if (rc == -1) return HS_FEED_AGAIN;   /* EAGAIN / EWOULDBLOCK        */
-    if (rc ==  0) return HS_FEED_EOF;     /* clean peer close             */
-    if (rc == -2) return HS_FEED_IO_ERR;  /* hard error (errno preserved) */
-    if (rc == -3) {
+    if (rc == -1) {
+        if (hs_ring_len(&conn->ring) == 0) {
+            return HS_FEED_AGAIN;   /* EAGAIN / EWOULDBLOCK        */
+        }
+    } else if (rc == 0) {
+        if (hs_ring_len(&conn->ring) == 0) {
+            return HS_FEED_EOF;     /* clean peer close            */
+        }
+    } else if (rc == -2) {
+        return HS_FEED_IO_ERR;  /* hard error (errno preserved) */
+    } else if (rc == -3) {
         /*
          * Ring is full. This should not happen in normal operation because
          * we drain the ring into the parser immediately after each recv.
@@ -371,16 +377,28 @@ hs_feed_result_t hs_conn_recv_and_feed(hs_conn_t *conn)
     if (seg_len == 0) return HS_FEED_OK;
 
     err = llhttp_execute(&conn->parser, ptr, (size_t)seg_len);
-    total_fed += seg_len;
-
-    /* Second segment (wrap-around remainder) – only if first was clean */
     if (err == HPE_OK) {
+        total_fed += seg_len;
+
+        /* Second segment (wrap-around remainder) – only if first was clean */
         uint32_t remaining = hs_ring_len(&conn->ring) - seg_len;
         if (remaining > 0) {
             /* Wrapped data always starts at physical index 0 */
             err = llhttp_execute(&conn->parser, conn->ring.data,
                                  (size_t)remaining);
-            total_fed += remaining;
+            if (err == HPE_OK) {
+                total_fed += remaining;
+            } else {
+                const char *error_pos = llhttp_get_error_pos(&conn->parser);
+                if (error_pos && error_pos >= conn->ring.data && error_pos <= conn->ring.data + remaining) {
+                    total_fed += (uint32_t)(error_pos - conn->ring.data);
+                }
+            }
+        }
+    } else {
+        const char *error_pos = llhttp_get_error_pos(&conn->parser);
+        if (error_pos && error_pos >= ptr && error_pos <= ptr + seg_len) {
+            total_fed += (uint32_t)(error_pos - ptr);
         }
     }
 

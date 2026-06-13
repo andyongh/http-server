@@ -1,19 +1,5 @@
 /**
- * tests/test_integration.c  –  end-to-end HTTP over real socketpairs
- *
- * Spins up a minimal server instance (no real network), connects via
- * socketpair, sends raw HTTP, reads raw HTTP back, and validates the
- * response status + body.
- *
- * Tests:
- *   1. GET / → 200 "Hello!"
- *   2. POST /echo → 200 echo body
- *   3. GET /notfound → 404
- *   4. Malformed request → 400
- *   5. Body > max_body_size → 413
- *   6. Multiple keep-alive requests on same connection
- *   7. UDS socketpair (same path, AF_UNIX)
- *   8. Concurrent requests from 8 client threads
+ * tests/test_integration.c  –  end-to-end HTTP integration tests
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -27,8 +13,11 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <time.h>
 
 #include "httpserver.h"
+
+static int PORT_BASE = 18180;
 
 /* ── helpers ────────────────────────────────────────────────────────────── */
 static int failures = 0;
@@ -158,56 +147,55 @@ static int tcp_connect(uint16_t port)
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  T1 – GET / → 200
+ *  Tests
  * ═══════════════════════════════════════════════════════════════════════════ */
+
 static void test_get_200(void)
 {
     printf("  test_get_200 … ");
+    fflush(stdout);
 
     srv_thread_arg_t a;
     hs_config_init(&a.cfg);
-    a.cfg.port         = 18080;
+    a.cfg.port         = PORT_BASE;
     a.cfg.num_threads  = 2;
     a.cfg.handler      = test_handler;
     a.cfg.reactor_mode = HS_REACTOR_SINGLE;
 
     pthread_t tid;
     hs_server_t *srv = start_server(&a, &tid);
-    if (!srv) { printf("SKIP (server start failed)\n"); return; }
+    if (!srv) { printf("SKIP\n"); return; }
 
-    /* Small sleep to let the event loop register the listen fd */
     struct timespec ts = {0, 20000000}; nanosleep(&ts, NULL);
 
-    int fd = tcp_connect(18080);
+    int fd = tcp_connect(PORT_BASE);
     CHECK(fd >= 0);
-    if (fd < 0) { hs_server_stop(srv); pthread_join(tid, NULL); return; }
+    if (fd >= 0) {
+        const char req[] = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        write(fd, req, strlen(req));
 
-    const char req[] = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    write(fd, req, strlen(req));
+        char buf[4096] = {0};
+        recv_response(fd, buf, sizeof(buf));
+        close(fd);
 
-    char buf[4096] = {0};
-    recv_response(fd, buf, sizeof(buf));
-    close(fd);
-
-    CHECK_EQ(parse_status(buf), 200);
-    const char *body = parse_body(buf);
-    CHECK(body && strcmp(body, "Hello!") == 0);
+        CHECK_EQ(parse_status(buf), 200);
+        const char *body = parse_body(buf);
+        CHECK(body && strcmp(body, "Hello!") == 0);
+    }
 
     hs_server_stop(srv);
     pthread_join(tid, NULL);
     printf("ok\n");
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  T2 – POST /echo → echoes body
- * ═══════════════════════════════════════════════════════════════════════════ */
 static void test_post_echo(void)
 {
     printf("  test_post_echo … ");
+    fflush(stdout);
 
     srv_thread_arg_t a;
     hs_config_init(&a.cfg);
-    a.cfg.port         = 18081;
+    a.cfg.port         = PORT_BASE + 1;
     a.cfg.num_threads  = 2;
     a.cfg.handler      = test_handler;
     a.cfg.reactor_mode = HS_REACTOR_SINGLE;
@@ -218,40 +206,38 @@ static void test_post_echo(void)
 
     struct timespec ts = {0, 20000000}; nanosleep(&ts, NULL);
 
-    int fd = tcp_connect(18081);
+    int fd = tcp_connect(PORT_BASE + 1);
     CHECK(fd >= 0);
-    if (fd < 0) { hs_server_stop(srv); pthread_join(tid, NULL); return; }
+    if (fd >= 0) {
+        const char body[] = "ping-pong-test-123";
+        char req[512];
+        int rlen = snprintf(req, sizeof(req),
+            "POST /echo HTTP/1.1\r\nHost: localhost\r\n"
+            "Content-Length: %zu\r\n\r\n%s", strlen(body), body);
+        write(fd, req, (size_t)rlen);
 
-    const char body[]  = "ping";
-    char req[256];
-    int  rlen = snprintf(req, sizeof(req),
-        "POST /echo HTTP/1.1\r\nHost: localhost\r\n"
-        "Content-Length: %zu\r\n\r\n%s", strlen(body), body);
-    write(fd, req, (size_t)rlen);
+        char buf[4096] = {0};
+        recv_response(fd, buf, sizeof(buf));
+        close(fd);
 
-    char buf[4096] = {0};
-    recv_response(fd, buf, sizeof(buf));
-    close(fd);
-
-    CHECK_EQ(parse_status(buf), 200);
-    const char *rb = parse_body(buf);
-    CHECK(rb && strcmp(rb, body) == 0);
+        CHECK_EQ(parse_status(buf), 200);
+        const char *rb = parse_body(buf);
+        CHECK(rb && strcmp(rb, body) == 0);
+    }
 
     hs_server_stop(srv);
     pthread_join(tid, NULL);
     printf("ok\n");
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  T3 – unknown URL → 404
- * ═══════════════════════════════════════════════════════════════════════════ */
 static void test_404(void)
 {
     printf("  test_404 … ");
+    fflush(stdout);
 
     srv_thread_arg_t a;
     hs_config_init(&a.cfg);
-    a.cfg.port         = 18082;
+    a.cfg.port         = PORT_BASE + 2;
     a.cfg.num_threads  = 2;
     a.cfg.handler      = test_handler;
     a.cfg.reactor_mode = HS_REACTOR_SINGLE;
@@ -262,10 +248,11 @@ static void test_404(void)
 
     struct timespec ts = {0, 20000000}; nanosleep(&ts, NULL);
 
-    int fd = tcp_connect(18082);
+    int fd = tcp_connect(PORT_BASE + 2);
     CHECK(fd >= 0);
     if (fd >= 0) {
-        write(fd, "GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n", 42);
+        const char req[] = "GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        write(fd, req, strlen(req));
         char buf[4096] = {0};
         recv_response(fd, buf, sizeof(buf));
         close(fd);
@@ -277,16 +264,14 @@ static void test_404(void)
     printf("ok\n");
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  T4 – malformed request → 400
- * ═══════════════════════════════════════════════════════════════════════════ */
 static void test_400(void)
 {
     printf("  test_400 … ");
+    fflush(stdout);
 
     srv_thread_arg_t a;
     hs_config_init(&a.cfg);
-    a.cfg.port         = 18083;
+    a.cfg.port         = PORT_BASE + 3;
     a.cfg.num_threads  = 2;
     a.cfg.handler      = test_handler;
     a.cfg.reactor_mode = HS_REACTOR_SINGLE;
@@ -297,10 +282,11 @@ static void test_400(void)
 
     struct timespec ts = {0, 20000000}; nanosleep(&ts, NULL);
 
-    int fd = tcp_connect(18083);
+    int fd = tcp_connect(PORT_BASE + 3);
     CHECK(fd >= 0);
     if (fd >= 0) {
-        write(fd, "BADREQUEST !!!\r\n\r\n", 18);
+        const char req[] = "BADREQUEST !!!\r\n\r\n";
+        write(fd, req, strlen(req));
         char buf[4096] = {0};
         recv_response(fd, buf, sizeof(buf));
         close(fd);
@@ -312,20 +298,18 @@ static void test_400(void)
     printf("ok\n");
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  T5 – body > max_body_size → 413
- * ═══════════════════════════════════════════════════════════════════════════ */
 static void test_413(void)
 {
     printf("  test_413 … ");
+    fflush(stdout);
 
     srv_thread_arg_t a;
     hs_config_init(&a.cfg);
-    a.cfg.port          = 18084;
+    a.cfg.port          = PORT_BASE + 4;
     a.cfg.num_threads   = 2;
     a.cfg.handler       = test_handler;
     a.cfg.reactor_mode  = HS_REACTOR_SINGLE;
-    a.cfg.max_body_size = 128;   /* tiny limit */
+    a.cfg.max_body_size = 64;
 
     pthread_t tid;
     hs_server_t *srv = start_server(&a, &tid);
@@ -333,13 +317,13 @@ static void test_413(void)
 
     struct timespec ts = {0, 20000000}; nanosleep(&ts, NULL);
 
-    int fd = tcp_connect(18084);
+    int fd = tcp_connect(PORT_BASE + 4);
     CHECK(fd >= 0);
     if (fd >= 0) {
         char req[512];
-        int  rlen = snprintf(req, sizeof(req),
+        int rlen = snprintf(req, sizeof(req),
             "POST /echo HTTP/1.1\r\nHost: localhost\r\n"
-            "Content-Length: 10485760\r\n\r\n");
+            "Content-Length: 1024\r\n\r\n");
         write(fd, req, (size_t)rlen);
         char buf[4096] = {0};
         recv_response(fd, buf, sizeof(buf));
@@ -352,16 +336,14 @@ static void test_413(void)
     printf("ok\n");
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  T6 – keep-alive: two requests on the same connection
- * ═══════════════════════════════════════════════════════════════════════════ */
 static void test_keepalive(void)
 {
     printf("  test_keepalive … ");
+    fflush(stdout);
 
     srv_thread_arg_t a;
     hs_config_init(&a.cfg);
-    a.cfg.port         = 18085;
+    a.cfg.port         = PORT_BASE + 5;
     a.cfg.num_threads  = 2;
     a.cfg.handler      = test_handler;
     a.cfg.reactor_mode = HS_REACTOR_SINGLE;
@@ -372,20 +354,18 @@ static void test_keepalive(void)
 
     struct timespec ts = {0, 20000000}; nanosleep(&ts, NULL);
 
-    int fd = tcp_connect(18085);
+    int fd = tcp_connect(PORT_BASE + 5);
     CHECK(fd >= 0);
     if (fd >= 0) {
-        /* First request */
-        const char r1[] =
-            "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n";
+        /* Request 1: keepalive */
+        const char r1[] = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n";
         write(fd, r1, strlen(r1));
         char buf[4096] = {0};
         recv_response(fd, buf, sizeof(buf));
         CHECK_EQ(parse_status(buf), 200);
 
-        /* Second request on the same connection */
-        const char r2[] =
-            "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        /* Request 2: close */
+        const char r2[] = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
         write(fd, r2, strlen(r2));
         memset(buf, 0, sizeof(buf));
         recv_response(fd, buf, sizeof(buf));
@@ -398,9 +378,183 @@ static void test_keepalive(void)
     printf("ok\n");
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  T7 – concurrent load: 8 threads × 50 requests
- * ═══════════════════════════════════════════════════════════════════════════ */
+static void test_pipelining(void)
+{
+    printf("  test_pipelining … ");
+    fflush(stdout);
+
+    srv_thread_arg_t a;
+    hs_config_init(&a.cfg);
+    a.cfg.port         = PORT_BASE + 6;
+    a.cfg.num_threads  = 2;
+    a.cfg.handler      = test_handler;
+    a.cfg.reactor_mode = HS_REACTOR_SINGLE;
+
+    pthread_t tid;
+    hs_server_t *srv = start_server(&a, &tid);
+    if (!srv) { printf("SKIP\n"); return; }
+
+    struct timespec ts = {0, 20000000}; nanosleep(&ts, NULL);
+
+    int fd = tcp_connect(PORT_BASE + 6);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+        /* Write two requests back-to-back in a single write call */
+        const char reqs[] =
+            "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"
+            "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        write(fd, reqs, strlen(reqs));
+
+        /* Read both responses sequentially */
+        char buf1[4096] = {0};
+        recv_response(fd, buf1, sizeof(buf1));
+        CHECK_EQ(parse_status(buf1), 200);
+        const char *body1 = parse_body(buf1);
+        CHECK(body1 && strcmp(body1, "Hello!") == 0);
+
+        char buf2[4096] = {0};
+        recv_response(fd, buf2, sizeof(buf2));
+        CHECK_EQ(parse_status(buf2), 200);
+        const char *body2 = parse_body(buf2);
+        CHECK(body2 && strcmp(body2, "Hello!") == 0);
+
+        close(fd);
+    }
+
+    hs_server_stop(srv);
+    pthread_join(tid, NULL);
+    printf("ok\n");
+}
+
+static void test_http10_close(void)
+{
+    printf("  test_http10_close … ");
+    fflush(stdout);
+
+    srv_thread_arg_t a;
+    hs_config_init(&a.cfg);
+    a.cfg.port         = PORT_BASE + 7;
+    a.cfg.num_threads  = 2;
+    a.cfg.handler      = test_handler;
+    a.cfg.reactor_mode = HS_REACTOR_SINGLE;
+
+    pthread_t tid;
+    hs_server_t *srv = start_server(&a, &tid);
+    if (!srv) { printf("SKIP\n"); return; }
+
+    struct timespec ts = {0, 20000000}; nanosleep(&ts, NULL);
+
+    int fd = tcp_connect(PORT_BASE + 7);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+        /* HTTP/1.0 defaults to close */
+        const char req[] = "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n";
+        write(fd, req, strlen(req));
+
+        char buf[4096] = {0};
+        recv_response(fd, buf, sizeof(buf));
+        CHECK_EQ(parse_status(buf), 200);
+
+        /* Verify connection is closed by checking if read returns EOF */
+        char dummy;
+        ssize_t n = read(fd, &dummy, 1);
+        CHECK(n == 0);  /* Clean peer close */
+
+        close(fd);
+    }
+
+    hs_server_stop(srv);
+    pthread_join(tid, NULL);
+    printf("ok\n");
+}
+
+static void test_http10_keepalive(void)
+{
+    printf("  test_http10_keepalive … ");
+    fflush(stdout);
+
+    srv_thread_arg_t a;
+    hs_config_init(&a.cfg);
+    a.cfg.port         = PORT_BASE + 8;
+    a.cfg.num_threads  = 2;
+    a.cfg.handler      = test_handler;
+    a.cfg.reactor_mode = HS_REACTOR_SINGLE;
+
+    pthread_t tid;
+    hs_server_t *srv = start_server(&a, &tid);
+    if (!srv) { printf("SKIP\n"); return; }
+
+    struct timespec ts = {0, 20000000}; nanosleep(&ts, NULL);
+
+    int fd = tcp_connect(PORT_BASE + 8);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+        /* HTTP/1.0 with Connection: keep-alive */
+        const char r1[] = "GET / HTTP/1.0\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n";
+        write(fd, r1, strlen(r1));
+        char buf[4096] = {0};
+        recv_response(fd, buf, sizeof(buf));
+        CHECK_EQ(parse_status(buf), 200);
+
+        /* Request 2: close */
+        const char r2[] = "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n";
+        write(fd, r2, strlen(r2));
+        memset(buf, 0, sizeof(buf));
+        recv_response(fd, buf, sizeof(buf));
+        CHECK_EQ(parse_status(buf), 200);
+        close(fd);
+    }
+
+    hs_server_stop(srv);
+    pthread_join(tid, NULL);
+    printf("ok\n");
+}
+
+static void test_chunked_request(void)
+{
+    printf("  test_chunked_request … ");
+    fflush(stdout);
+
+    srv_thread_arg_t a;
+    hs_config_init(&a.cfg);
+    a.cfg.port         = PORT_BASE + 9;
+    a.cfg.num_threads  = 2;
+    a.cfg.handler      = test_handler;
+    a.cfg.reactor_mode = HS_REACTOR_SINGLE;
+
+    pthread_t tid;
+    hs_server_t *srv = start_server(&a, &tid);
+    if (!srv) { printf("SKIP\n"); return; }
+
+    struct timespec ts = {0, 20000000}; nanosleep(&ts, NULL);
+
+    int fd = tcp_connect(PORT_BASE + 9);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+        const char req[] =
+            "POST /echo HTTP/1.1\r\n"
+            "Host: localhost\r\n"
+            "Transfer-Encoding: chunked\r\n\r\n"
+            "4\r\nwiki\r\n"
+            "5\r\npedia\r\n"
+            "0\r\n\r\n";
+        write(fd, req, strlen(req));
+
+        char buf[4096] = {0};
+        recv_response(fd, buf, sizeof(buf));
+        close(fd);
+
+        CHECK_EQ(parse_status(buf), 200);
+        const char *body = parse_body(buf);
+        CHECK(body && strcmp(body, "wikipedia") == 0);
+    }
+
+    hs_server_stop(srv);
+    pthread_join(tid, NULL);
+    printf("ok\n");
+}
+
+/* ── concurrent load: 8 threads × 50 requests ──────────────────────────── */
 #define CONC_THREADS  8
 #define CONC_REQS     50
 
@@ -416,9 +570,24 @@ static void *conc_client(void *arg)
     for (int i = 0; i < CONC_REQS; i++) {
         int fd = tcp_connect(a->port);
         if (fd < 0) { a->fail++; continue; }
-        write(fd, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", 52);
+        
+        /* Mix keep-alive and connection close requests */
+        const char *req = (i % 2 == 0)
+            ? "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"
+            : "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+            
+        write(fd, req, strlen(req));
         char buf[4096] = {0};
         recv_response(fd, buf, sizeof(buf));
+        
+        if (i % 2 == 0) {
+            /* If we kept it alive, make one more request on it, then close */
+            const char r2[] = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+            write(fd, r2, strlen(r2));
+            memset(buf, 0, sizeof(buf));
+            recv_response(fd, buf, sizeof(buf));
+        }
+        
         close(fd);
         if (parse_status(buf) == 200) a->ok++;
         else                           a->fail++;
@@ -434,7 +603,7 @@ static void test_concurrent(void)
 
     srv_thread_arg_t a;
     hs_config_init(&a.cfg);
-    a.cfg.port         = 18086;
+    a.cfg.port         = PORT_BASE + 10;
     a.cfg.num_threads  = 4;
     a.cfg.handler      = test_handler;
     a.cfg.reactor_mode = HS_REACTOR_SINGLE;
@@ -448,7 +617,7 @@ static void test_concurrent(void)
     pthread_t ctids[CONC_THREADS];
     conc_arg_t cargs[CONC_THREADS];
     for (int i = 0; i < CONC_THREADS; i++) {
-        cargs[i] = (conc_arg_t){ .port = 18086 };
+        cargs[i] = (conc_arg_t){ .port = PORT_BASE + 10, .ok = 0, .fail = 0 };
         pthread_create(&ctids[i], NULL, conc_client, &cargs[i]);
     }
 
@@ -467,16 +636,14 @@ static void test_concurrent(void)
     printf("ok  (ok=%d fail=%d)\n", total_ok, total_fail);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  T8 – Multi-reactor mode: same tests with HS_REACTOR_MULTI
- * ═══════════════════════════════════════════════════════════════════════════ */
 static void test_multi_reactor_get(void)
 {
     printf("  test_multi_reactor_get … ");
+    fflush(stdout);
 
     srv_thread_arg_t a;
     hs_config_init(&a.cfg);
-    a.cfg.port           = 18087;
+    a.cfg.port           = PORT_BASE + 11;
     a.cfg.num_threads    = 4;
     a.cfg.num_io_threads = 2;
     a.cfg.handler        = test_handler;
@@ -488,10 +655,11 @@ static void test_multi_reactor_get(void)
 
     struct timespec ts = {0, 30000000}; nanosleep(&ts, NULL);
 
-    int fd = tcp_connect(18087);
+    int fd = tcp_connect(PORT_BASE + 11);
     CHECK(fd >= 0);
     if (fd >= 0) {
-        write(fd, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", 52);
+        const char req[] = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        write(fd, req, strlen(req));
         char buf[4096] = {0};
         recv_response(fd, buf, sizeof(buf));
         close(fd);
@@ -503,12 +671,12 @@ static void test_multi_reactor_get(void)
     printf("ok\n");
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  main
- * ═══════════════════════════════════════════════════════════════════════════ */
+/* ── main ────────────────────────────────────────────────────────────────── */
 int main(void)
 {
-    printf("Integration tests\n\n");
+    PORT_BASE = 18180;
+
+    printf("Integration tests (PORT_BASE=%d)\n\n", PORT_BASE);
 
     test_get_200();
     test_post_echo();
@@ -516,6 +684,10 @@ int main(void)
     test_400();
     test_413();
     test_keepalive();
+    test_pipelining();
+    test_http10_close();
+    test_http10_keepalive();
+    test_chunked_request();
     test_concurrent();
     test_multi_reactor_get();
 

@@ -454,7 +454,8 @@ static void test_keepalive_pipeline(void)
     /*
      * Two pipelined requests in one socketpair write.
      * After the first message_complete, llhttp self-pauses (HPE_PAUSED).
-     * We call llhttp_resume() and re-feed for the second request.
+     * We preserve the remaining bytes in the ring buffer, reset the parser,
+     * and re-feed for the second request.
      */
     const char two_reqs[] =
         "GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n"
@@ -466,28 +467,13 @@ static void test_keepalive_pipeline(void)
     g_request_complete_called = 0;
     hs_feed_result_t r = hs_conn_recv_and_feed(&conn);
     CHECK(r == HS_FEED_OK);
-    CHECK(g_request_complete_called >= 1);
+    CHECK(g_request_complete_called == 1);
     CHECK(strcmp(conn.req.url, "/first") == 0);
 
     /* Simulate keep-alive reset (normally done in write_cb) */
     hs_conn_reset_req(&conn);
 
-    /*
-     * After reset, the remaining data ("/second…") is already gone from the
-     * ring (drained by the first feed call).  In a real server the second
-     * request arrives in a subsequent read.  For testing purposes, re-inject
-     * the second request.
-     */
-    int fds2[2];
-    socketpair(AF_UNIX, SOCK_STREAM, 0, fds2);
-    fcntl(fds2[0], F_SETFL, fcntl(fds2[0], F_GETFL, 0) | O_NONBLOCK);
-    const char second[] = "GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    write(fds2[1], second, strlen(second));
-    close(fds2[1]);
-
-    close(conn.fd);
-    conn.fd = fds2[0];
-
+    /* Second request: should parse directly from the remaining bytes in the ring */
     g_request_complete_called = 0;
     r = hs_conn_recv_and_feed(&conn);
     CHECK(r == HS_FEED_OK);

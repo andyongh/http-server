@@ -28,7 +28,7 @@ void hs_config_init(hs_config_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
     cfg->listen_flags    = HS_LISTEN_TCP;
-    cfg->host            = "0.0.0.0";
+    cfg->host            = "127.0.0.1";
     cfg->port            = 8080;
     cfg->backlog         = 1024;
     cfg->reactor_mode    = HS_REACTOR_SINGLE;
