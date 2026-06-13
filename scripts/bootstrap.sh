@@ -182,7 +182,7 @@ if [[ ! -f "$S" ]]; then
         cp "$DEPS/llhttp/build/libllhttp.a" "$B/llhttp/lib/"
         [[ -f "$DEPS/llhttp/build/libllhttp.so" ]] && cp "$DEPS/llhttp/build/libllhttp.so" "$B/llhttp/lib/" || true
     else
-        git checkout v9.4.1
+        git checkout v9.4.1 2>/dev/null || true
         npm ci
         make
         make install PREFIX="$B/llhttp"
