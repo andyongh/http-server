@@ -19,8 +19,8 @@ struct hs_server {
     hs_listener_t        listeners[HS_MAX_LISTENERS];
     int                  nlisteners;
 
-    hs_reactor_group_t  *rg;
-    struct hs_pool       *pool;
+    hs_reactor_t        *reactor;    /* single reactor (IO thread) */
+    struct hs_pool       *pool;      /* optional CPU thread pool   */
 
     atomic_int            running;
 };

@@ -2,6 +2,9 @@
  * tests/test_integration.c  –  end-to-end HTTP integration tests
  */
 #define _GNU_SOURCE
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,7 +78,7 @@ static const char *parse_body(const char *resp)
 }
 
 /* ── C handler used by the test server ─────────────────────────────────── */
-static void test_handler(hs_request_t *req, hs_response_t *res, void *ud)
+static hs_dispatch_mode_t test_handler(hs_request_t *req, hs_response_t *res, void *ud)
 {
     (void)ud;
     const char *url = hs_req_url(req);
@@ -96,6 +99,7 @@ static void test_handler(hs_request_t *req, hs_response_t *res, void *ud)
         hs_res_body_str(res, "Not Found");
     }
     hs_res_send(res);
+    return HS_DISPATCH_INLINE;
 }
 
 /* ── server thread: runs hs_server_run() ────────────────────────────────── */
@@ -158,7 +162,6 @@ static void test_get_200(void)
     a.cfg.port         = PORT_BASE;
     a.cfg.num_threads  = 2;
     a.cfg.handler      = test_handler;
-    a.cfg.reactor_mode = HS_REACTOR_SINGLE;
 
     pthread_t tid;
     hs_server_t *srv = start_server(&a, &tid);
@@ -196,7 +199,6 @@ static void test_post_echo(void)
     a.cfg.port         = PORT_BASE + 1;
     a.cfg.num_threads  = 2;
     a.cfg.handler      = test_handler;
-    a.cfg.reactor_mode = HS_REACTOR_SINGLE;
 
     pthread_t tid;
     hs_server_t *srv = start_server(&a, &tid);
@@ -238,7 +240,6 @@ static void test_404(void)
     a.cfg.port         = PORT_BASE + 2;
     a.cfg.num_threads  = 2;
     a.cfg.handler      = test_handler;
-    a.cfg.reactor_mode = HS_REACTOR_SINGLE;
 
     pthread_t tid;
     hs_server_t *srv = start_server(&a, &tid);
@@ -272,7 +273,6 @@ static void test_400(void)
     a.cfg.port         = PORT_BASE + 3;
     a.cfg.num_threads  = 2;
     a.cfg.handler      = test_handler;
-    a.cfg.reactor_mode = HS_REACTOR_SINGLE;
 
     pthread_t tid;
     hs_server_t *srv = start_server(&a, &tid);
@@ -306,7 +306,6 @@ static void test_413(void)
     a.cfg.port          = PORT_BASE + 4;
     a.cfg.num_threads   = 2;
     a.cfg.handler       = test_handler;
-    a.cfg.reactor_mode  = HS_REACTOR_SINGLE;
     a.cfg.max_body_size = 64;
 
     pthread_t tid;
@@ -344,7 +343,6 @@ static void test_keepalive(void)
     a.cfg.port         = PORT_BASE + 5;
     a.cfg.num_threads  = 2;
     a.cfg.handler      = test_handler;
-    a.cfg.reactor_mode = HS_REACTOR_SINGLE;
 
     pthread_t tid;
     hs_server_t *srv = start_server(&a, &tid);
@@ -386,7 +384,6 @@ static void test_pipelining(void)
     a.cfg.port         = PORT_BASE + 6;
     a.cfg.num_threads  = 2;
     a.cfg.handler      = test_handler;
-    a.cfg.reactor_mode = HS_REACTOR_SINGLE;
 
     pthread_t tid;
     hs_server_t *srv = start_server(&a, &tid);
@@ -434,7 +431,6 @@ static void test_http10_close(void)
     a.cfg.port         = PORT_BASE + 7;
     a.cfg.num_threads  = 2;
     a.cfg.handler      = test_handler;
-    a.cfg.reactor_mode = HS_REACTOR_SINGLE;
 
     pthread_t tid;
     hs_server_t *srv = start_server(&a, &tid);
@@ -476,7 +472,6 @@ static void test_http10_keepalive(void)
     a.cfg.port         = PORT_BASE + 8;
     a.cfg.num_threads  = 2;
     a.cfg.handler      = test_handler;
-    a.cfg.reactor_mode = HS_REACTOR_SINGLE;
 
     pthread_t tid;
     hs_server_t *srv = start_server(&a, &tid);
@@ -518,7 +513,6 @@ static void test_chunked_request(void)
     a.cfg.port         = PORT_BASE + 9;
     a.cfg.num_threads  = 2;
     a.cfg.handler      = test_handler;
-    a.cfg.reactor_mode = HS_REACTOR_SINGLE;
 
     pthread_t tid;
     hs_server_t *srv = start_server(&a, &tid);
@@ -604,7 +598,6 @@ static void test_concurrent(void)
     a.cfg.port         = PORT_BASE + 10;
     a.cfg.num_threads  = 4;
     a.cfg.handler      = test_handler;
-    a.cfg.reactor_mode = HS_REACTOR_SINGLE;
 
     pthread_t tid;
     hs_server_t *srv = start_server(&a, &tid);
@@ -643,9 +636,7 @@ static void test_multi_reactor_get(void)
     hs_config_init(&a.cfg);
     a.cfg.port           = PORT_BASE + 11;
     a.cfg.num_threads    = 4;
-    a.cfg.num_io_threads = 2;
     a.cfg.handler        = test_handler;
-    a.cfg.reactor_mode   = HS_REACTOR_MULTI;
 
     pthread_t tid;
     hs_server_t *srv = start_server(&a, &tid);

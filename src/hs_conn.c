@@ -26,12 +26,12 @@
 #include <unistd.h>
 #include <errno.h>
 
-#include <jemalloc/jemalloc.h>
+#include "hs_alloc.h"
 #include <llhttp.h>
 
 #include "hs_conn.h"
 #include "hs_log.h"
-#include "hs_reactor.h"   /* hs_sub_reactor_t, hs_on_request_complete */
+#include "hs_reactor.h"   /* hs_reactor_t, hs_on_request_complete */
 #include "hs_server.h"
 
 /* ─────────────────────── forward declarations ────────────────────────── */
@@ -121,7 +121,7 @@ static int cb_headers_complete(llhttp_t *p)
     }
 
     /* ── 413 early-out on declared Content-Length ── */
-    size_t max = c->sub->srv->config.max_body_size;
+    size_t max = c->reactor->srv->config.max_body_size;
     if (r->content_length > max) {
         r->body_413 = 1;
         return HPE_USER;
@@ -146,7 +146,7 @@ static int cb_body(llhttp_t *p, const char *at, size_t len)
     r->body_received += len;
 
     /* ── streaming 413 check (chunked or no Content-Length) ── */
-    if (r->body_received > c->sub->srv->config.max_body_size) {
+    if (r->body_received > c->reactor->srv->config.max_body_size) {
         r->body_413 = 1;
         return HPE_USER;
     }
@@ -264,8 +264,8 @@ static void req_commit_header(hs_conn_t *c)
         return;
     }
     int i = r->nheaders++;
-    r->headers[i].name  = je_strdup(r->_hdr_field);
-    r->headers[i].value = je_strdup(r->_hdr_value);
+    r->headers[i].name  = hs_strdup(r->_hdr_field);
+    r->headers[i].value = hs_strdup(r->_hdr_value);
     r->_hdr_field[0] = r->_hdr_value[0] = '\0';
     r->_hdr_field_ready = 0;
 }
@@ -274,7 +274,7 @@ static int overflow_ensure(hs_parsed_req_t *r, size_t cap)
 {
     if (r->overflow) return 0;   /* already allocated */
     if (cap == 0) cap = HS_RING_SIZE;
-    r->overflow = (char *)je_malloc(cap);
+    r->overflow = (char *)hs_malloc(cap);
     if (!r->overflow) return -1;
     r->overflow_cap = cap;
     r->overflow_len = 0;
@@ -286,7 +286,7 @@ static int overflow_append(hs_parsed_req_t *r, const char *d, size_t n)
     if (r->overflow_len + n > r->overflow_cap) {
         size_t nc = r->overflow_cap ? r->overflow_cap * 2 : n * 2;
         while (nc < r->overflow_len + n) nc *= 2;
-        char *p = (char *)je_realloc(r->overflow, nc);
+        char *p = (char *)hs_realloc(r->overflow, nc);
         if (!p) return -1;
         r->overflow = p;
         r->overflow_cap = nc;
@@ -319,12 +319,12 @@ static void parser_init(hs_conn_t *c)
  *  Public API
  * ══════════════════════════════════════════════════════════════════════ */
 
-void hs_conn_init(hs_conn_t *conn, int fd, struct hs_sub_reactor *sub)
+void hs_conn_init(hs_conn_t *conn, int fd, struct hs_reactor *reactor)
 {
     hs_buf_init(&conn->wbuf, 4096);
     conn->fd        = fd;
     conn->state     = HS_CONN_READING;
-    conn->sub       = sub;
+    conn->reactor   = reactor;
     conn->wbuf_sent = 0;
     hs_ring_init(&conn->ring);
     memset(&conn->req, 0, sizeof(conn->req));
@@ -335,10 +335,10 @@ void hs_conn_reset_req(hs_conn_t *conn)
 {
     hs_parsed_req_t *r = &conn->req;
     for (int i = 0; i < r->nheaders; i++) {
-        je_free(r->headers[i].name);
-        je_free(r->headers[i].value);
+        hs_free(r->headers[i].name);
+        hs_free(r->headers[i].value);
     }
-    je_free(r->overflow);
+    hs_free(r->overflow);
     memset(r, 0, sizeof(*r));
     llhttp_reset(&conn->parser);
 }
@@ -347,10 +347,10 @@ void hs_conn_cleanup(hs_conn_t *conn)
 {
     hs_parsed_req_t *r = &conn->req;
     for (int i = 0; i < r->nheaders; i++) {
-        je_free(r->headers[i].name);
-        je_free(r->headers[i].value);
+        hs_free(r->headers[i].name);
+        hs_free(r->headers[i].value);
     }
-    je_free(r->overflow);
+    hs_free(r->overflow);
     hs_buf_free(&conn->wbuf);
 }
 
@@ -379,12 +379,6 @@ hs_feed_result_t hs_conn_recv_and_feed(hs_conn_t *conn)
     } else if (rc == -2) {
         return HS_FEED_IO_ERR;  /* hard error (errno preserved) */
     } else if (rc == -3) {
-        /*
-         * Ring is full. This should not happen in normal operation because
-         * we drain the ring into the parser immediately after each recv.
-         * If it does occur (e.g. parser paused mid-request), treat as
-         * a body-too-large condition.
-         */
         conn->req.body_413 = 1;
         return HS_FEED_TOO_LARGE;
     }
@@ -433,17 +427,10 @@ hs_feed_result_t hs_conn_recv_and_feed(hs_conn_t *conn)
     }
 
     if (err == HPE_PAUSED) {
-        /*
-         * llhttp pauses itself after message_complete so the caller can
-         * detect pipelined requests. If we have a complete message this
-         * is normal – return OK.  If no message was complete it means a
-         * real pause (unexpected in our usage): treat as parse error.
-         */
         return conn->req.msg_complete ? HS_FEED_OK : HS_FEED_PARSE_ERR;
     }
 
     if (err == HPE_PAUSED_UPGRADE) {
-        /* Client sent Upgrade / CONNECT – we don't support it */
         conn->req.body_upgrade = 1;
         return HS_FEED_UPGRADE;
     }

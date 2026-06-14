@@ -5,8 +5,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
-#include <jemalloc/jemalloc.h>
 
+#include "hs_alloc.h"
 #include "hs_http.h"
 #include "hs_conn.h"
 #include "httpserver.h"
@@ -39,7 +39,7 @@ const char *hs_http_status_str(int c)
 
 hs_response_t *hs_http_response_new(struct hs_conn *conn)
 {
-    hs_response_t *r = (hs_response_t *)je_calloc(1, sizeof(*r));
+    hs_response_t *r = (hs_response_t *)hs_calloc(1, sizeof(*r));
     if (!r) return NULL;
     r->status = 200;
     r->conn   = conn;
@@ -51,22 +51,22 @@ void hs_http_response_free(hs_response_t *r)
 {
     if (!r) return;
     for (int i = 0; i < r->nheaders; i++) {
-        je_free(r->headers[i].name);
-        je_free(r->headers[i].value);
+        hs_free(r->headers[i].name);
+        hs_free(r->headers[i].value);
     }
     hs_buf_free(&r->body);
-    je_free(r);
+    hs_free(r);
 }
 
-/* ── public builder API (called from worker threads) ────────────────────── */
+/* ── public builder API (called from worker threads or reactor) ──────────── */
 void hs_res_status(hs_response_t *r, int code)   { r->status = code; }
 
 void hs_res_header(hs_response_t *r, const char *n, const char *v)
 {
     if (r->nheaders >= HS_RES_MAX_HEADERS) return;
     int i = r->nheaders++;
-    r->headers[i].name  = je_strdup(n);
-    r->headers[i].value = je_strdup(v);
+    r->headers[i].name  = hs_strdup(n);
+    r->headers[i].value = hs_strdup(v);
 }
 
 void hs_res_body(hs_response_t *r, const char *d, size_t l)
@@ -80,7 +80,7 @@ void hs_res_body_str(hs_response_t *r, const char *s)
     hs_res_body(r, s, strlen(s));
 }
 
-/* hs_res_send() lives in hs_reactor.c (needs sub->resp_queue + resp_efd) */
+/* hs_res_send() lives in hs_reactor.c (needs reactor->resp_queue + resp_efd) */
 
 /* ── serialise into conn->wbuf (called on IO thread) ────────────────────── */
 void hs_http_response_serialise(hs_response_t *res)
@@ -89,7 +89,7 @@ void hs_http_response_serialise(hs_response_t *res)
     hs_buf_t  *out  = &conn->wbuf;
     hs_buf_reset(out);
 
-    hs_buf_appendf(out, "HTTP/1.1 %d %s\r\nServer: httpserver/0.2\r\n",
+    hs_buf_appendf(out, "HTTP/1.1 %d %s\r\nServer: httpserver/0.4-lite\r\n",
                    res->status, hs_http_status_str(res->status));
     hs_buf_appendf(out, "Content-Length: %zu\r\n", res->body.len);
     hs_buf_append_str(out,
@@ -112,7 +112,7 @@ void hs_http_error(struct hs_conn *conn, int status, const char *msg)
     hs_buf_t *out = &conn->wbuf;
     hs_buf_reset(out);
     hs_buf_appendf(out,
-        "HTTP/1.1 %d %s\r\nServer: httpserver/0.2\r\n"
+        "HTTP/1.1 %d %s\r\nServer: httpserver/0.4-lite\r\n"
         "Content-Type: text/plain\r\nContent-Length: %zu\r\n"
         "Connection: close\r\n\r\n%s",
         status, hs_http_status_str(status), strlen(msg), msg);

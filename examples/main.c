@@ -1,17 +1,29 @@
 /**
- * examples/main.c  –  demonstrate all three new features:
+ * examples/main.c  –  httpserver-lite v0.4-lite  Single-Reactor example
+ *
+ * Features demonstrated:
  *   1. TCP + UDS dual listener
- *   2. Single vs Multi reactor (toggle via -m flag)
- *   3. Zero-malloc ring buffer (transparent to the handler)
+ *   2. INLINE dispatch (handler in reactor thread, num_threads=0)
+ *   3. WORKER dispatch (handler in CPU pool, HS_WORKERS=N env var)
+ *   4. Lua handler via lua_dir (auto hot-reload)
+ *   5. Zero-malloc ring buffer (transparent to the handler)
  *
- * Build:  cmake -S .. -B ../build && cmake --build ../build
+ * Build:
+ *   make
+ *   make HS_USE_JEMALLOC=1   # with jemalloc
  *
- * Test TCP:  curl http://localhost:8080/
- *            curl -X POST http://localhost:8080/echo -d "hello"
+ * Run:
+ *   ./build/out/httpserver_example          # C handler, inline dispatch
+ *   HS_WORKERS=4 ./build/out/...           # C handler, 4 CPU workers
+ *   HS_LUA=examples/handler.lua ./build/out/...  # Lua handler
+ *   HS_LUA_DIR=examples/lua ./build/out/...      # Lua dir with hot-reload
+ *   REACTOR=multi ./build/out/...          # (removed in v0.4-lite – NOOP)
  *
- * Test UDS:  curl --unix-socket /tmp/httpserver.sock http://localhost/
- *
- * Toggle multi-reactor:  REACTOR=multi ./build/example_hello
+ * Test:
+ *   curl http://localhost:8080/
+ *   curl -X POST http://localhost:8080/echo -d "hello"
+ *   curl http://localhost:8080/ping
+ *   curl --unix-socket /tmp/httpserver.sock http://localhost/
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -28,8 +40,9 @@ static void on_signal(int sig)
     if (g_srv) hs_server_stop(g_srv);
 }
 
-/* ── handler ─────────────────────────────────────────────────────────────── */
-static void handle(hs_request_t *req, hs_response_t *res, void *ud)
+/* ── C handler ───────────────────────────────────────────────────────────── */
+static hs_dispatch_mode_t handle(hs_request_t *req, hs_response_t *res,
+                                 void *ud)
 {
     (void)ud;
     const char *url    = hs_req_url(req);
@@ -39,7 +52,7 @@ static void handle(hs_request_t *req, hs_response_t *res, void *ud)
     if (strcmp(url, "/") == 0) {
         hs_res_status(res, 200);
         hs_res_header(res, "Content-Type", "text/plain");
-        hs_res_body_str(res, "Hello from httpserver v2!\n");
+        hs_res_body_str(res, "Hello from httpserver v0.4-lite!\n");
 
     } else if (strncmp(url, "/echo", 5) == 0) {
         size_t len = 0;
@@ -47,6 +60,11 @@ static void handle(hs_request_t *req, hs_response_t *res, void *ud)
         hs_res_status(res, 200);
         hs_res_header(res, "Content-Type", "text/plain");
         hs_res_body(res, len ? body : "(empty)\n", len ? len : 8);
+
+    } else if (strcmp(url, "/ping") == 0) {
+        hs_res_status(res, 200);
+        hs_res_header(res, "Content-Type", "text/plain");
+        hs_res_body_str(res, "pong\n");
 
     } else if (strcmp(url, "/headers") == 0) {
         const char *ct = hs_req_header(req, "Content-Type");
@@ -66,6 +84,7 @@ static void handle(hs_request_t *req, hs_response_t *res, void *ud)
     }
 
     hs_res_send(res);
+    return HS_DISPATCH_INLINE;
 }
 
 /* ── main ────────────────────────────────────────────────────────────────── */
@@ -77,29 +96,46 @@ int main(void)
     hs_config_t cfg;
     hs_config_init(&cfg);
 
-    /* ── dual listener: TCP + UDS ── */
-    cfg.listen_flags = HS_LISTEN_TCP | HS_LISTEN_UDS;
-    cfg.host         = "0.0.0.0";
-    cfg.port         = 8080;
-    cfg.uds_path     = "/tmp/httpserver.sock";
-    cfg.backlog      = 1024;
-
-    /* ── reactor model: set REACTOR=multi in env to use MULTI ── */
-    const char *mode = getenv("REACTOR");
-    if (mode && strcmp(mode, "multi") == 0) {
-        cfg.reactor_mode   = HS_REACTOR_MULTI;
-        cfg.num_io_threads = 0;   /* auto = nproc */
-        printf("[main] reactor mode: MULTI\n");
+    /* ── listen: TCP + optional UDS ── */
+    const char *uds = getenv("HS_UDS");
+    if (uds && *uds) {
+        cfg.listen_flags = HS_LISTEN_TCP | HS_LISTEN_UDS;
+        cfg.uds_path     = uds;
     } else {
-        cfg.reactor_mode = HS_REACTOR_SINGLE;
-        printf("[main] reactor mode: SINGLE\n");
+        cfg.listen_flags = HS_LISTEN_TCP;
     }
 
-    cfg.num_threads  = 0;             /* CPU workers: auto */
-    cfg.conn_pool_cap = 2048;
-    cfg.max_body_size = 1 * 1024 * 1024;  /* 1 MiB */
+    const char *host = getenv("HS_HOST");
+    cfg.host = host && *host ? host : "0.0.0.0";
 
-    cfg.handler = handle;
+    const char *port_str = getenv("HS_PORT");
+    cfg.port = port_str ? (uint16_t)atoi(port_str) : 8080;
+
+    cfg.backlog       = 1024;
+    cfg.conn_pool_cap = 2048;
+    cfg.max_body_size = 4u * 1024u * 1024u;  /* 4 MiB */
+
+    /* ── dispatch: 0 = inline, N = N worker threads, -1 = auto ── */
+    const char *workers_str = getenv("HS_WORKERS");
+    cfg.num_threads = workers_str ? atoi(workers_str) : 0;
+
+    /* ── Lua handler (lua_dir overrides lua_script) ── */
+    const char *lua_dir    = getenv("HS_LUA_DIR");
+    const char *lua_script = getenv("HS_LUA");
+
+    if (lua_dir && *lua_dir) {
+        cfg.lua_dir = lua_dir;
+        printf("[main] Lua dir: %s (hot-reload enabled)\n", lua_dir);
+    } else if (lua_script && *lua_script) {
+        cfg.lua_script = lua_script;
+        printf("[main] Lua script: %s\n", lua_script);
+    } else {
+        cfg.handler = handle;
+        printf("[main] C handler (INLINE dispatch)\n");
+    }
+
+    printf("[main] listening on %s:%d  workers=%d\n",
+           cfg.host, cfg.port, cfg.num_threads);
 
     g_srv = hs_server_new(&cfg);
     if (!g_srv) { fprintf(stderr, "server_new failed\n"); return 1; }

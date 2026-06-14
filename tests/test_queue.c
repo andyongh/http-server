@@ -16,7 +16,7 @@
 #include <stdatomic.h>
 #include <assert.h>
 
-#include <jemalloc/jemalloc.h>
+#include "hs_alloc.h"
 #include "hs_queue.h"
 
 /* ── helper ─────────────────────────────────────────────────────────────── */
@@ -67,7 +67,7 @@ static void test_mpsc_concurrent(void)
     /* Pre-allocate nodes per producer */
     hs_mpsc_node_t *pools[MPSC_PRODUCERS];
     for (int i = 0; i < MPSC_PRODUCERS; i++)
-        pools[i] = je_calloc(MPSC_PER_PROD, sizeof(hs_mpsc_node_t));
+        pools[i] = hs_calloc(MPSC_PER_PROD, sizeof(hs_mpsc_node_t));
 
     pthread_t tids[MPSC_PRODUCERS];
     mpsc_prod_arg_t args[MPSC_PRODUCERS];
@@ -100,7 +100,7 @@ static void test_mpsc_concurrent(void)
     for (int i = 0; i < MPSC_PRODUCERS; i++)
         CHECK(counts[i] == MPSC_PER_PROD);
 
-    for (int i = 0; i < MPSC_PRODUCERS; i++) je_free(pools[i]);
+    for (int i = 0; i < MPSC_PRODUCERS; i++) hs_free(pools[i]);
     printf("ok  (total=%d)\n", total);
 }
 

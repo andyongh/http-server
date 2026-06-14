@@ -26,7 +26,7 @@
 #include <errno.h>
 #include <sys/socket.h>
 
-#include <jemalloc/jemalloc.h>
+#include "hs_alloc.h"
 #include <llhttp.h>
 
 /* Pull in the internal headers */
@@ -78,7 +78,7 @@ void hs_res_send(hs_response_t *res) { (void)res; }
 /* ── build a fake server + sub-reactor ──────────────────────────────────── */
 typedef struct {
     hs_server_t      srv;
-    hs_sub_reactor_t sub;
+    hs_reactor_t     reactor;
 } mock_ctx_t;
 
 static void mock_ctx_init(mock_ctx_t *m, size_t max_body)
@@ -86,7 +86,7 @@ static void mock_ctx_init(mock_ctx_t *m, size_t max_body)
     memset(m, 0, sizeof(*m));
     hs_config_init(&m->srv.config);
     m->srv.config.max_body_size = max_body;
-    m->sub.srv = &m->srv;
+    m->reactor.srv = &m->srv;
 }
 
 /* ── create a connected socketpair and write HTTP bytes into the write end ─ */
@@ -114,7 +114,7 @@ static int inject_bytes(hs_conn_t *conn, mock_ctx_t *m,
     }
     close(fds[1]);
 
-    hs_conn_init(conn, fds[0], &m->sub);
+    hs_conn_init(conn, fds[0], &m->reactor);
     return 0;
 }
 
@@ -199,10 +199,10 @@ static void test_post_large_body_overflow(void)
     mock_ctx_t m; mock_ctx_init(&m, body_size * 2);
     hs_conn_t conn;
 
-    char *body = (char *)je_malloc(body_size);
+    char *body = (char *)hs_malloc(body_size);
     memset(body, 'X', body_size);
 
-    char *req_hdr = (char *)je_malloc(256);
+    char *req_hdr = (char *)hs_malloc(256);
     int hdrlen = snprintf(req_hdr, 256,
         "POST /big HTTP/1.1\r\n"
         "Host: localhost\r\n"
@@ -223,9 +223,9 @@ static void test_post_large_body_overflow(void)
     write(fds[1], req_hdr, (size_t)hdrlen);
     write(fds[1], body, body_size);
     close(fds[1]);
-    je_free(req_hdr); je_free(body);
+    hs_free(req_hdr); hs_free(body);
 
-    hs_conn_init(&conn, fds[0], &m.sub);
+    hs_conn_init(&conn, fds[0], &m.reactor);
 
     g_request_complete_called = 0;
     /* May need multiple calls because the body is larger than one ring fill */
@@ -379,7 +379,7 @@ static void test_eof(void)
     fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL, 0) | O_NONBLOCK);
     close(fds[1]);   /* immediate EOF */
 
-    hs_conn_init(&conn, fds[0], &m.sub);
+    hs_conn_init(&conn, fds[0], &m.reactor);
     hs_feed_result_t r = hs_conn_recv_and_feed(&conn);
     CHECK_EQ(r, HS_FEED_EOF);
 
@@ -399,7 +399,7 @@ static void test_eagain(void)
     fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL, 0) | O_NONBLOCK);
     /* Write end open, nothing written → EAGAIN */
 
-    hs_conn_init(&conn, fds[0], &m.sub);
+    hs_conn_init(&conn, fds[0], &m.reactor);
     hs_feed_result_t r = hs_conn_recv_and_feed(&conn);
     CHECK_EQ(r, HS_FEED_AGAIN);
 

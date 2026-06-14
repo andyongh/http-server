@@ -1,21 +1,21 @@
 /**
- * httpserver.h  –  public API
+ * httpserver.h  –  public API  (v0.4-lite: Single-Reactor only)
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
- * │  SINGLE-REACTOR  (HS_REACTOR_SINGLE)                                    │
+ * │  Single-Reactor Architecture                                            │
  * │                                                                         │
- * │   Calling thread ── fsae loop ── accept/read/write ── work_queue      │
- * │                                                         │               │
- * │                              CPU pool ◄────────────────┘               │
- * └─────────────────────────────────────────────────────────────────────────┘
- *
- * ┌─────────────────────────────────────────────────────────────────────────┐
- * │  MULTI-REACTOR  (HS_REACTOR_MULTI)                                      │
- * │                                                                         │
- * │   Boss thread ── fsae ── accept ──► pipe[i] ──► Sub-reactor[i]        │
- * │   (round-robin dispatch)             read/write                         │
- * │                                          │                              │
- * │                              CPU pool ◄──┘  (shared, M threads)        │
+ * │   Calling thread ── fsae epoll/kqueue loop                             │
+ * │     accept()  ──► conn_pool_alloc  ──► AE_READABLE                    │
+ * │     read_cb   ──► hs_ring_recv ──► llhttp ──► hs_on_request_complete   │
+ * │     │                                                                   │
+ * │     ├─ INLINE dispatch (HS_DISPATCH_INLINE):                           │
+ * │     │    handler() called immediately in reactor thread                │
+ * │     │    → response serialised → AE_WRITABLE → write()                │
+ * │     │                                                                   │
+ * │     └─ WORKER dispatch (HS_DISPATCH_WORKER):                           │
+ * │          conn suspended (INFLIGHT) → hs_spmc_push(work_queue)         │
+ * │          CPU pool worker calls handler() → hs_res_send()               │
+ * │          → MPSC push → eventfd/pipe wakeup → reactor resumes write    │
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * RECEIVE PATH – zero-malloc ring buffer
@@ -27,7 +27,18 @@
  *   Body handling:
  *     Content-Length > max_body_size  → 413 + close (no alloc)
  *     body fits in ring, contiguous   → zero-copy pointer into ring->data
- *     body wraps ring OR > ring size  → one je_malloc("overflow buffer")
+ *     body wraps ring OR > ring size  → one malloc("overflow buffer")
+ *
+ * LUA DIRECTORY HOT-RELOAD
+ * ────────────────────────
+ *   Set lua_dir to a directory; any .lua file change triggers automatic
+ *   reload of the handler in all worker threads.  Monitoring uses inotify
+ *   on Linux or kqueue on macOS.
+ *
+ * LUA COROUTINE TASK QUEUE
+ * ────────────────────────
+ *   hs_lua_queue.h provides a Lua-coroutine-based task queue that integrates
+ *   with the reactor event loop, enabling async Lua tasks without threads.
  */
 #pragma once
 #ifdef __cplusplus
@@ -49,46 +60,81 @@ typedef enum {
     HS_LISTEN_UDS  = 0x02,   /* AF_UNIX socket path */
 } hs_listen_flags_t;
 
-/* ── reactor model ──────────────────────────────────────────────────────── */
+/* ── dispatch mode ───────────────────────────────────────────────────────── */
+/**
+ * HS_DISPATCH_INLINE:
+ *   Handler is called directly in the reactor (IO) thread.
+ *   Use for lightweight, non-blocking work (routing, echo, static data).
+ *   hs_res_send() completes inline; no eventfd wakeup overhead.
+ *
+ * HS_DISPATCH_WORKER:
+ *   Connection is suspended (INFLIGHT). Handler is executed in a CPU
+ *   worker thread from the pool. After hs_res_send(), the IO thread is
+ *   woken via eventfd/pipe to flush the response.
+ *   Use for CPU-intensive or blocking work.
+ *
+ * The dispatch mode is selected per-request by the C handler or by the
+ * Lua handler returning a string "inline" or "worker" (default: "worker").
+ *
+ * num_threads == 0: pool is disabled. All requests use INLINE dispatch
+ * regardless of the requested mode.
+ */
 typedef enum {
-    HS_REACTOR_SINGLE = 0,   /* one IO thread  (calling thread)      */
-    HS_REACTOR_MULTI  = 1,   /* boss + N sub-reactor IO threads      */
-} hs_reactor_mode_t;
+    HS_DISPATCH_INLINE = 0,  /* handle in reactor thread, respond immediately */
+    HS_DISPATCH_WORKER = 1,  /* suspend conn, dispatch to CPU worker pool     */
+} hs_dispatch_mode_t;
 
 /* ── handler signature ──────────────────────────────────────────────────── */
-typedef void (*hs_handler_fn)(hs_request_t *req, hs_response_t *res,
-                              void *user_data);
+/**
+ * The C handler receives (req, res, user_data) and must either:
+ *   - Call hs_res_send(res) and return HS_DISPATCH_INLINE, or
+ *   - Return HS_DISPATCH_WORKER to defer handling to the worker pool
+ *     (in which case hs_process_work will call it again in a worker thread
+ *     and the handler MUST call hs_res_send before returning).
+ *
+ * Simpler pattern: always call hs_res_send() and return HS_DISPATCH_INLINE.
+ * The worker dispatch path only applies when num_threads > 0.
+ */
+typedef hs_dispatch_mode_t (*hs_handler_fn)(hs_request_t *req,
+                                            hs_response_t *res,
+                                            void *user_data);
 
 /* ── server configuration ───────────────────────────────────────────────── */
 typedef struct {
     /* ── listen ────────────────────────────────────────────────────────── */
     hs_listen_flags_t listen_flags;  /* default: HS_LISTEN_TCP            */
-    const char       *host;          /* TCP bind addr, default "0.0.0.0"  */
+    const char       *host;          /* TCP bind addr, default "127.0.0.1"*/
     uint16_t          port;          /* TCP port, default 8080             */
     int               backlog;       /* listen() backlog, default 1024     */
     const char       *uds_path;      /* UDS socket path (HS_LISTEN_UDS)   */
 
-    /* ── reactor ────────────────────────────────────────────────────────── */
-    hs_reactor_mode_t reactor_mode;  /* default: HS_REACTOR_SINGLE        */
-    int               num_io_threads;/* sub-reactors (0=auto, MULTI only) */
+    /* ── CPU workers (optional) ──────────────────────────────────────────
+     *   num_threads == 0  → no worker pool (all requests: INLINE dispatch)
+     *   num_threads  > 0  → N worker threads created
+     *   num_threads == -1 → auto (nproc)
+     */
+    int               num_threads;
 
-    /* ── CPU workers ────────────────────────────────────────────────────── */
-    int               num_threads;   /* 0 = nproc                          */
+    /* ── per-reactor connection pool ─────────────────────────────────── */
+    int               conn_pool_cap; /* connections, default 1024         */
 
-    /* ── per-reactor connection pool ────────────────────────────────────── */
-    int               conn_pool_cap; /* connections per reactor, def 1024  */
+    /* ── limits ──────────────────────────────────────────────────────── */
+    size_t            max_body_size; /* default 4 MiB; 413 if exceeded    */
+    size_t            max_url_len;   /* default 8192                      */
+    int               max_headers;   /* default 64                        */
 
-    /* ── limits ─────────────────────────────────────────────────────────── */
-    size_t            max_body_size; /* default 4 MiB; 413 if exceeded     */
-    size_t            max_url_len;   /* default 8192                       */
-    int               max_headers;   /* default 64                         */
-
-    /* ── C handler (mutually exclusive with lua_script) ─────────────────── */
+    /* ── C handler ───────────────────────────────────────────────────── */
     hs_handler_fn     handler;
     void             *handler_ud;
 
-    /* ── Lua handler (takes priority over C handler when set) ───────────── */
-    const char       *lua_script;
+    /* ── Lua handler (takes priority over C handler when set) ──────────
+     *   lua_script: path to a single Lua file
+     *   lua_dir:    path to a directory of Lua files (hot-reload enabled)
+     *               The directory must contain a file named "handler.lua"
+     *               which defines the global function `handle(req, res)`.
+     */
+    const char       *lua_script;    /* single Lua file (no hot-reload)  */
+    const char       *lua_dir;       /* Lua directory  (hot-reload)      */
 } hs_config_t;
 
 void hs_config_init(hs_config_t *cfg);   /* fill with sane defaults */
@@ -106,6 +152,7 @@ const char *hs_req_url(const hs_request_t *req);
 const char *hs_req_header(const hs_request_t *req, const char *name);
 const char *hs_req_body(const hs_request_t *req, size_t *out_len);
 const char *hs_req_http_version(const hs_request_t *req);
+int         hs_req_in_worker(const hs_request_t *req);
 
 /* ── response builder ───────────────────────────────────────────────────── */
 void hs_res_status(hs_response_t *res, int code);

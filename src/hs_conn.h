@@ -6,7 +6,7 @@
  * Body handling:
  *   Content-Length > max_body_size  → HPE_USER → HS_FEED_TOO_LARGE (0 alloc)
  *   body fits ring, contiguous      → zero-copy ptr into ring->data
- *   body wraps ring or > RING_SIZE  → one je_malloc overflow buffer
+ *   body wraps ring or > RING_SIZE  → one malloc overflow buffer
  *
  * llhttp error taxonomy exposed via hs_feed_result_t:
  *   HS_FEED_OK           normal / message complete
@@ -14,8 +14,8 @@
  *   HS_FEED_PARSE_ERR    bad HTTP syntax → 400
  *   HS_FEED_TOO_LARGE    body > max_body_size → 413
  *   HS_FEED_UPGRADE      Upgrade / CONNECT not supported → 501
- *   HS_FEED_EOF          peer closed cleanly
- *   HS_FEED_IO_ERR       hard read() error → close
+ *   HS_FEED_EOF          peer closed connection cleanly
+ *   HS_FEED_IO_ERR       hard read error → close
  */
 #pragma once
 
@@ -23,18 +23,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <jemalloc/jemalloc.h>
 
-static inline char *je_strdup(const char *s) {
-    if (!s) return NULL;
-    size_t len = strlen(s) + 1;
-    char *dup = (char *)je_malloc(len);
-    if (dup) {
-        memcpy(dup, s, len);
-    }
-    return dup;
-}
-
+#include "hs_alloc.h"
 #include <llhttp.h>
 
 #include "hs_ring.h"
@@ -108,14 +98,14 @@ typedef enum {
     HS_CONN_CLOSING,            /* peer EOF or error while INFLIGHT         */
 } hs_conn_state_t;
 
-struct hs_sub_reactor;
+struct hs_reactor;
 
 /* ── connection ─────────────────────────────────────────────────────────── */
 typedef struct hs_conn {
     int               fd;
     hs_conn_state_t   state;
 
-    struct hs_sub_reactor *sub;   /* owning IO thread (immutable after init) */
+    struct hs_reactor *reactor;   /* owning reactor (immutable after init) */
 
     /* HTTP/1.x parser */
     llhttp_t          parser;
@@ -130,15 +120,16 @@ typedef struct hs_conn {
     hs_buf_t          wbuf;
     size_t            wbuf_sent;
 
-    /* MPSC node for the response queue */
+    /* MPSC node for the response queue (worker → IO thread path) */
     hs_mpsc_node_t    resp_node;
 
-    /* Index in the owning sub-reactor's connection pool */
+    /* Index in the owning reactor's connection pool */
+    int               in_worker;
     int               pool_idx;
 } hs_conn_t;
 
 /* ── lifecycle ──────────────────────────────────────────────────────────── */
-void hs_conn_init(hs_conn_t *conn, int fd, struct hs_sub_reactor *sub);
+void hs_conn_init(hs_conn_t *conn, int fd, struct hs_reactor *reactor);
 void hs_conn_reset_req(hs_conn_t *conn);
 void hs_conn_cleanup(hs_conn_t *conn);
 
@@ -151,7 +142,7 @@ void hs_conn_cleanup(hs_conn_t *conn);
  * Returns one of the hs_feed_result_t values.
  *
  * On HS_FEED_OK with conn->req.msg_complete == 1 the caller should dispatch
- * the request to a worker thread.
+ * the request (either inline or to a worker thread).
  *
  * On any error value the caller is responsible for sending the appropriate
  * error response (or closing the connection).

@@ -1,7 +1,9 @@
 /**
- * hs_lua.c  –  LuaJIT bindings for request and response
+ * hs_lua.c  –  LuaJIT bindings for request and response  (v0.4-lite)
  *
- * Each worker thread owns one lua_State.
+ * Each worker thread (or the reactor thread for inline dispatch) owns
+ * one lua_State.
+ *
  * The handler is called as:  handle(req, res)
  *   req.method, req.url  (fields via __index)
  *   req:header(name)     (method)
@@ -10,24 +12,33 @@
  *   res:header(name,val)
  *   res:body(str)
  *   res:send()           ← MUST be called
+ *
+ * Changes from v0.3:
+ *   - Uses hs_alloc.h shim (system malloc or jemalloc)
+ *   - Registers hs_queue_push() for Lua coroutine task queue
  */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
-#include <jemalloc/jemalloc.h>
+
+#include "hs_alloc.h"
 #include <lua.h>
 #include <lualib.h>
 #include <lauxlib.h>
 #include <llhttp.h>
 
 #include "hs_lua.h"
+#include "hs_lua_queue.h"
 #include "hs_conn.h"
 #include "hs_http.h"
 #include "hs_log.h"
 #include "httpserver.h"
 
-struct hs_lua_state { lua_State *L; };
+struct hs_lua_state {
+    lua_State          *L;
+    hs_lua_coro_queue_t coro_q;
+};
 
 #define MT_REQ "hs.Request"
 #define MT_RES "hs.Response"
@@ -49,6 +60,12 @@ static int lreq_body(lua_State *L)
     size_t len = 0;
     const char *b = hs_req_body((hs_request_t *)*pp, &len);
     lua_pushlstring(L, b, len); return 1;
+}
+static int lreq_in_worker(lua_State *L)
+{
+    hs_conn_t **pp = (hs_conn_t **)luaL_checkudata(L, 1, MT_REQ);
+    lua_pushboolean(L, (*pp)->in_worker);
+    return 1;
 }
 static int lreq_index(lua_State *L)
 {
@@ -89,7 +106,8 @@ static int lres_send(lua_State *L)
     hs_res_send(*pp); return 0;
 }
 
-static const luaL_Reg lreq_m[] = {{"header",lreq_header},{"body",lreq_body},{NULL,NULL}};
+static const luaL_Reg lreq_m[] = {{"header",lreq_header},{"body",lreq_body},
+                                    {"in_worker",lreq_in_worker},{NULL,NULL}};
 static const luaL_Reg lres_m[] = {{"status",lres_status},{"header",lres_header},
                                     {"body",lres_body},{"send",lres_send},{NULL,NULL}};
 
@@ -107,20 +125,25 @@ static void reg_types(lua_State *L)
 /* ── public API ──────────────────────────────────────────────────────────── */
 hs_lua_state_t *hs_lua_state_new(const char *script)
 {
-    hs_lua_state_t *ls = (hs_lua_state_t *)je_calloc(1, sizeof(*ls));
+    hs_lua_state_t *ls = (hs_lua_state_t *)hs_calloc(1, sizeof(*ls));
     if (!ls) return NULL;
     ls->L = luaL_newstate();
-    if (!ls->L) { je_free(ls); return NULL; }
+    if (!ls->L) { hs_free(ls); return NULL; }
     luaL_openlibs(ls->L);
     reg_types(ls->L);
+
+    /* Initialise coroutine queue and register hs_queue_push() */
+    hs_coro_queue_init(&ls->coro_q, ls->L);
+    hs_coro_queue_register(&ls->coro_q, ls->L);
+
     if (luaL_loadfile(ls->L, script) || lua_pcall(ls->L, 0, 0, 0)) {
         hs_log(HS_LOG_ERROR, "lua load error: %s", lua_tostring(ls->L, -1));
-        lua_close(ls->L); je_free(ls); return NULL;
+        lua_close(ls->L); hs_free(ls); return NULL;
     }
     lua_getglobal(ls->L, "handle");
     if (!lua_isfunction(ls->L, -1)) {
         hs_log(HS_LOG_ERROR, "lua missing global 'handle'");
-        lua_close(ls->L); je_free(ls); return NULL;
+        lua_close(ls->L); hs_free(ls); return NULL;
     }
     lua_pop(ls->L, 1);
     return ls;
@@ -128,13 +151,33 @@ hs_lua_state_t *hs_lua_state_new(const char *script)
 
 void hs_lua_state_free(hs_lua_state_t *ls)
 {
-    if (ls) { if (ls->L) lua_close(ls->L); je_free(ls); }
+    if (ls) {
+        if (ls->L) {
+            hs_coro_queue_destroy(&ls->coro_q);
+            lua_close(ls->L);
+        }
+        hs_free(ls);
+    }
+}
+
+/**
+ * Tick the coroutine queue.  Call once per handler invocation or from
+ * a before-sleep hook to advance queued coroutines.
+ */
+void hs_lua_state_tick(hs_lua_state_t *ls)
+{
+    if (ls && ls->L)
+        hs_coro_queue_tick(&ls->coro_q);
 }
 
 int hs_lua_call_handler(hs_lua_state_t *ls,
                          struct hs_conn *conn, struct hs_response *res)
 {
     lua_State *L = ls->L;
+
+    /* Tick the coroutine queue first */
+    hs_coro_queue_tick(&ls->coro_q);
+
     lua_getglobal(L, "handle");
 
     hs_conn_t     **rp = (hs_conn_t     **)lua_newuserdata(L, sizeof(void *));
@@ -145,10 +188,18 @@ int hs_lua_call_handler(hs_lua_state_t *ls,
     *wp = res;
     luaL_getmetatable(L, MT_RES); lua_setmetatable(L, -2);
 
-    if (lua_pcall(L, 2, 0, 0)) {
+    if (lua_pcall(L, 2, 1, 0)) {
         hs_log(HS_LOG_ERROR, "lua runtime error: %s", lua_tostring(L, -1));
         lua_pop(L, 1);
         return -1;
     }
-    return 0;
+    int mode = 0; /* default to HS_DISPATCH_INLINE (0) */
+    if (lua_isstring(L, -1)) {
+        const char *str = lua_tostring(L, -1);
+        if (strcmp(str, "worker") == 0) {
+            mode = 1; /* HS_DISPATCH_WORKER (1) */
+        }
+    }
+    lua_pop(L, 1);
+    return mode;
 }

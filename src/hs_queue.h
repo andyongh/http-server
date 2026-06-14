@@ -2,17 +2,19 @@
  * hs_queue.h
  *
  *   hs_mpsc_t  –  lock-free MPSC linked list (Vyukov intrusive algorithm)
- *                 Workers → IO sub-reactor  (response path)
+ *                 Workers → IO reactor  (response path)
  *
  *   hs_spmc_t  –  mutex + condvar bounded ring
- *                 IO thread → Workers       (work-item path)
+ *                 IO thread → Workers   (work-item path)
+ *
+ * Uses hs_alloc.h shim (system malloc by default, jemalloc optional).
  */
 #pragma once
 
 #include <stdint.h>
 #include <stdatomic.h>
 #include <pthread.h>
-#include <jemalloc/jemalloc.h>
+#include "hs_alloc.h"
 
 /* ╔══════════════════════════════════════════════════════════════════════════╗
  * ║  MPSC – lock-free  (multiple producers, single consumer)               ║

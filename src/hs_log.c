@@ -10,6 +10,9 @@
  *   • Thread-safe registration (lock-free atomics, no mutex on hot path).
  */
 #define _GNU_SOURCE
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE
+#endif
 #include "hs_log.h"
 
 #include <stdio.h>

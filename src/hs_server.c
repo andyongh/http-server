@@ -1,8 +1,14 @@
 /**
- * hs_server.c  –  public API implementation
+ * hs_server.c  –  public API implementation  (v0.4-lite: Single-Reactor)
  *
  * The heavy lifting (IO loops, accept, read, write) lives in hs_reactor.c.
  * This file owns the public API surface and the server lifecycle.
+ *
+ * Key changes from v0.3:
+ *   - Removed Multi-Reactor mode
+ *   - num_threads == 0 → no pool (all dispatch INLINE)
+ *   - num_threads == -1 → auto-detect (nproc)
+ *   - Added lua_dir support (Lua directory hot-reload)
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -13,7 +19,7 @@
 #include <signal.h>
 #include <errno.h>
 
-#include <jemalloc/jemalloc.h>
+#include "hs_alloc.h"
 #include <llhttp.h>
 
 #include "hs_server.h"
@@ -21,6 +27,7 @@
 #include "hs_http.h"
 #include "hs_listener.h"
 #include "hs_reactor.h"
+#include "hs_lua_dir.h"
 #include "httpserver.h"
 #include "hs_log.h"
 
@@ -32,9 +39,7 @@ void hs_config_init(hs_config_t *cfg)
     cfg->host            = "127.0.0.1";
     cfg->port            = 8080;
     cfg->backlog         = 1024;
-    cfg->reactor_mode    = HS_REACTOR_SINGLE;
-    cfg->num_io_threads  = 0;
-    cfg->num_threads     = 0;
+    cfg->num_threads     = 0;     /* 0 = inline only (no pool) */
     cfg->conn_pool_cap   = 1024;
     cfg->max_body_size   = 4u * 1024u * 1024u;
     cfg->max_url_len     = 8192;
@@ -44,20 +49,26 @@ void hs_config_init(hs_config_t *cfg)
 /* ── hs_server_new ───────────────────────────────────────────────────────── */
 hs_server_t *hs_server_new(const hs_config_t *cfg)
 {
-    hs_server_t *srv = (hs_server_t *)je_calloc(1, sizeof(*srv));
+    hs_server_t *srv = (hs_server_t *)hs_calloc(1, sizeof(*srv));
     if (!srv) return NULL;
 
     srv->config = *cfg;
     atomic_init(&srv->running, 1);
 
     /* ── auto-detect CPU workers ── */
-    if (srv->config.num_threads <= 0) {
+    if (srv->config.num_threads < 0) {
 #ifdef _SC_NPROCESSORS_ONLN
         long n = sysconf(_SC_NPROCESSORS_ONLN);
         srv->config.num_threads = n > 0 ? (int)n : 4;
 #else
         srv->config.num_threads = 4;
 #endif
+    }
+    /* 0 → no pool at all (inline dispatch) */
+
+    /* ── validate Lua config ── */
+    if (cfg->lua_script && cfg->lua_dir) {
+        hs_log(HS_LOG_WARN, "[server] lua_script and lua_dir both set; lua_dir takes priority");
     }
 
     /* ── create listeners ── */
@@ -89,18 +100,20 @@ hs_server_t *hs_server_new(const hs_config_t *cfg)
         goto err;
     }
 
-    /* ── reactor group ── */
-    srv->rg = hs_reactor_group_new(srv);
-    if (!srv->rg) goto err;
+    /* ── single reactor ── */
+    srv->reactor = hs_reactor_new(srv);
+    if (!srv->reactor) goto err;
 
-    /* ── CPU thread pool ── */
-    srv->pool = hs_pool_new(srv->config.num_threads, srv);
-    if (!srv->pool) goto err;
+    /* ── optional CPU thread pool ── */
+    if (srv->config.num_threads > 0) {
+        srv->pool = hs_pool_new(srv->config.num_threads, srv);
+        if (!srv->pool) goto err;
+    }
 
-    hs_log(HS_LOG_INFO, "[server] mode=%s  io_threads=%d  workers=%d",
-           cfg->reactor_mode == HS_REACTOR_MULTI ? "MULTI" : "SINGLE",
-           srv->rg->nsubs,
-           srv->config.num_threads);
+    hs_log(HS_LOG_INFO, "[server] mode=SINGLE  workers=%d  lua=%s",
+           srv->config.num_threads,
+           cfg->lua_dir  ? cfg->lua_dir  :
+           cfg->lua_script ? cfg->lua_script : "(none)");
 
     return srv;
 
@@ -116,11 +129,20 @@ int hs_server_run(hs_server_t *srv)
      * return values). */
     signal(SIGPIPE, SIG_IGN);
 
-    int rc = hs_reactor_group_start(srv->rg);
+    /* Start Lua directory watcher (if configured) in the reactor loop */
+    if (srv->config.lua_dir) {
+        if (hs_lua_dir_watch_start(srv->reactor, srv->config.lua_dir) < 0) {
+            hs_log(HS_LOG_WARN, "[server] lua_dir watch failed; continuing without hot-reload");
+        }
+    }
+
+    int rc = hs_reactor_start(srv->reactor);
 
     /* Shutdown: drain and stop the worker pool */
-    hs_pool_shutdown(srv->pool);
-    srv->pool = NULL;
+    if (srv->pool) {
+        hs_pool_shutdown(srv->pool);
+        srv->pool = NULL;
+    }
 
     return rc;
 }
@@ -129,18 +151,18 @@ int hs_server_run(hs_server_t *srv)
 void hs_server_stop(hs_server_t *srv)
 {
     if (!atomic_exchange(&srv->running, 0)) return; /* already stopped */
-    hs_reactor_group_stop(srv->rg);
+    hs_reactor_stop(srv->reactor);
 }
 
 /* ── hs_server_free ──────────────────────────────────────────────────────── */
 void hs_server_free(hs_server_t *srv)
 {
     if (!srv) return;
-    if (srv->pool) { hs_pool_shutdown(srv->pool); srv->pool = NULL; }
-    if (srv->rg)   { hs_reactor_group_free(srv->rg); srv->rg = NULL; }
+    if (srv->pool)    { hs_pool_shutdown(srv->pool); srv->pool = NULL; }
+    if (srv->reactor) { hs_reactor_free(srv->reactor); srv->reactor = NULL; }
     for (int i = 0; i < srv->nlisteners; i++)
         hs_listener_close(&srv->listeners[i]);
-    je_free(srv);
+    hs_free(srv);
 }
 
 /* ── request accessors ───────────────────────────────────────────────────── */
@@ -199,4 +221,10 @@ const char *hs_req_http_version(const hs_request_t *req)
 {
     const hs_conn_t *conn = (const hs_conn_t *)req;
     return conn->req.http_minor == 1 ? "1.1" : "1.0";
+}
+
+int hs_req_in_worker(const hs_request_t *req)
+{
+    const hs_conn_t *conn = (const hs_conn_t *)req;
+    return conn->in_worker;
 }

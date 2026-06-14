@@ -1,5 +1,5 @@
 # =============================================================================
-# Makefile  –  httpserver
+# Makefile  –  httpserver-lite  (v0.4-lite)
 #
 # Works on:  Linux (gcc/clang)  |  macOS / Apple Silicon (clang)
 #
@@ -8,7 +8,7 @@
 #   make debug           -g3 -O0
 #   make asan            AddressSanitizer + UBSan
 #   make tsan            ThreadSanitizer
-#   make test            Build & run all four test suites
+#   make test            Build & run all test suites
 #   make test-asan       Tests under ASAN+UBSan
 #   make test-tsan       Queue test under TSan
 #   make clean           Remove build/out/
@@ -16,333 +16,274 @@
 #   make help            Show this message
 #
 # Knobs (command-line overrides)
-#   CC=clang             Compiler
-#   HS_RING_SIZE=16384   Ring buffer bytes (power-of-two, default 8192)
+#   CC=clang                  Compiler
+#   HS_RING_SIZE=16384        Ring buffer bytes (power-of-two, default 8192)
+#   HS_USE_JEMALLOC=1         Use jemalloc instead of system malloc
+#   HS_LOG_LEVEL=HS_LOG_INFO  Compile-time log level filter
 # =============================================================================
 
-CC           ?= cc
-AR           ?= ar
-HS_RING_SIZE ?= 8192
+CC            ?= cc
+AR            ?= ar
+HS_RING_SIZE  ?= 8192
+HS_USE_JEMALLOC ?= 0
 
 DEPS_BUILD   := build/deps
 BUILD_DIR    := build/out
 
-# ── detect OS ─────────────────────────────────────────────────────────────
+# ── detect OS ──────────────────────────────────────────────────────────────
 OS := $(shell uname -s)
 
 ifeq ($(OS),Darwin)
     NPROC    := $(shell sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
-    # macOS: LuaJIT and jemalloc may need flat_namespace or extra flags
     EXTRA_LDFLAGS  := -Wl,-rpath,$(DEPS_BUILD)/luajit/lib
-    # macOS linker is strict about duplicate symbols; tests provide stubs
-    # that intentionally shadow library symbols.
-    # The test .c is compiled first so its symbols take precedence over the
-    # archive (libraries are searched in order); no extra linker flag needed.
     TEST_LDFLAGS   :=
+    LUAJIT_ENV     := MACOSX_DEPLOYMENT_TARGET=15.0
 else
     NPROC    := $(shell nproc 2>/dev/null || echo 4)
     EXTRA_LDFLAGS :=
     TEST_LDFLAGS  :=
+    LUAJIT_ENV     :=
 endif
 
-# ── include / library paths ───────────────────────────────────────────────
+# ── include / library paths ────────────────────────────────────────────────
 INCS := \
     -Iinclude \
     -Isrc \
     -Ideps/fsae \
-    -I$(DEPS_BUILD)/jemalloc/include \
     -I$(DEPS_BUILD)/llhttp/include \
     -I$(DEPS_BUILD)/luajit/include/luajit-2.1
 
 LIBS := \
-    $(DEPS_BUILD)/jemalloc/lib/libjemalloc.a \
     $(DEPS_BUILD)/llhttp/lib/libllhttp.a \
     $(DEPS_BUILD)/luajit/lib/libluajit-5.1.a \
-    -lpthread -lm -ldl
+    -lpthread -lm
 
-# ── macOS: dl is part of libc, pthread already linked ────────────────────
-ifeq ($(OS),Darwin)
-    LIBS := $(filter-out -ldl,$(LIBS))
-    LIBS += $(EXTRA_LDFLAGS)
+# ── optional jemalloc ──────────────────────────────────────────────────────
+ifeq ($(HS_USE_JEMALLOC),1)
+    INCS += -I$(DEPS_BUILD)/jemalloc/include
+    LIBS += $(DEPS_BUILD)/jemalloc/lib/libjemalloc.a
+    JEMALLOC_FLAG := -DHS_USE_JEMALLOC
+else
+    JEMALLOC_FLAG :=
 endif
 
-# ── base compiler flags ───────────────────────────────────────────────────
+# ── macOS: dl is part of libc, pthread already linked ─────────────────────
+ifeq ($(OS),Darwin)
+    LIBS += $(EXTRA_LDFLAGS)
+else
+    LIBS += -ldl
+endif
+
+# ── base compiler flags ────────────────────────────────────────────────────
 BASE_CFLAGS := \
     -std=c11 \
     -Wall -Wextra -Wpedantic \
     -Wno-unused-parameter \
     -D_GNU_SOURCE \
     -D_POSIX_C_SOURCE=200809L \
-    -DHS_RING_SIZE=$(HS_RING_SIZE)
+    -DHS_RING_SIZE=$(HS_RING_SIZE) \
+    $(JEMALLOC_FLAG)
 
-# macOS: _GNU_SOURCE may warn; suppress with _DARWIN_C_SOURCE
-ifeq ($(OS),Darwin)
-    BASE_CFLAGS += -D_DARWIN_C_SOURCE
+# ── variant flags ──────────────────────────────────────────────────────────
+REL_FLAGS  := -O2
+DBG_FLAGS  := -g3 -O0 -DDEBUG
+ASAN_FLAGS := -g3 -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
+TSAN_FLAGS := -g3 -O1 -fsanitize=thread
+
+# ── source files ───────────────────────────────────────────────────────────
+LIB_SRCS := \
+    src/hs_ae_impl.c \
+    src/hs_conn.c \
+    src/hs_http.c \
+    src/hs_listener.c \
+    src/hs_log.c \
+    src/hs_lua.c \
+    src/hs_lua_dir.c \
+    src/hs_pool.c \
+    src/hs_reactor.c \
+    src/hs_server.c
+
+EXAMPLE_SRC  := examples/main.c
+EXAMPLE_BIN  := $(BUILD_DIR)/httpserver_example
+
+# ── default target ─────────────────────────────────────────────────────────
+.PHONY: all
+all: deps $(EXAMPLE_BIN)
+
+# ── build deps ─────────────────────────────────────────────────────────────
+.PHONY: deps
+deps: $(DEPS_BUILD)/llhttp/lib/libllhttp.a \
+      $(DEPS_BUILD)/luajit/lib/libluajit-5.1.a
+
+ifeq ($(HS_USE_JEMALLOC),1)
+deps: $(DEPS_BUILD)/jemalloc/lib/libjemalloc.a
 endif
 
-RELEASE_CFLAGS  := $(BASE_CFLAGS) -O3
-DEBUG_CFLAGS    := $(BASE_CFLAGS) -O0 -g3
-ASAN_CFLAGS     := $(BASE_CFLAGS) -O1 -g3 \
-    -fsanitize=address,undefined \
-    -fno-omit-frame-pointer \
-    -fno-optimize-sibling-calls
-TSAN_CFLAGS     := $(BASE_CFLAGS) -O1 -g3 \
-    -fsanitize=thread \
-    -fno-omit-frame-pointer
+$(DEPS_BUILD)/llhttp/lib/libllhttp.a:
+	@echo "[deps] building llhttp..."
+	@mkdir -p $(DEPS_BUILD)/llhttp
+	cd deps/llhttp && npm install && npm run build
+	$(MAKE) -C deps/llhttp install PREFIX=$(abspath $(DEPS_BUILD)/llhttp) \
+	    CLANG=$(CC) CC=$(CC)
 
-# Note: -march=native is omitted on macOS ARM to avoid clang warnings;
-# the compiler already optimises for the host with default flags on Apple Silicon
-ifneq ($(OS),Darwin)
-    RELEASE_CFLAGS += -march=native
-endif
+$(DEPS_BUILD)/luajit/lib/libluajit-5.1.a:
+	@echo "[deps] building LuaJIT..."
+	@mkdir -p $(DEPS_BUILD)/luajit
+	$(LUAJIT_ENV) $(MAKE) -C deps/luajit install \
+	    PREFIX=$(abspath $(DEPS_BUILD)/luajit) \
+	    BUILDMODE=static \
+	    CC=$(CC) \
+	    XCFLAGS="-DLUAJIT_ENABLE_GC64" \
+	    -j$(NPROC)
 
-ASAN_LDFLAGS := -fsanitize=address,undefined
-TSAN_LDFLAGS := -fsanitize=thread
+$(DEPS_BUILD)/jemalloc/lib/libjemalloc.a:
+	@echo "[deps] building jemalloc..."
+	@mkdir -p $(DEPS_BUILD)/jemalloc
+	cd deps/jemalloc && autoconf && \
+	    ./configure --prefix=$(abspath $(DEPS_BUILD)/jemalloc) \
+	                --disable-debug --with-jemalloc-prefix=je_ \
+	                --disable-shared && \
+	    $(MAKE) -j$(NPROC) && $(MAKE) install
 
-# ── jemalloc shim (used for standalone tests without libjemalloc) ─────────
-JEMALLOC_SHIM_DIR := $(BUILD_DIR)/jemalloc_shim/jemalloc
-JEMALLOC_SHIM     := $(JEMALLOC_SHIM_DIR)/jemalloc.h
+# ── library archive ────────────────────────────────────────────────────────
+LIB_OBJS_REL := $(patsubst src/%.c,$(BUILD_DIR)/rel/%.o,$(LIB_SRCS))
 
-# ── source files ──────────────────────────────────────────────────────────
-LIB_SRCS := $(wildcard src/*.c)
-LIB_HDRS := $(wildcard src/*.h) $(wildcard include/*.h)
+$(BUILD_DIR)/rel/%.o: src/%.c | $(BUILD_DIR)/rel
+	$(CC) $(BASE_CFLAGS) $(REL_FLAGS) $(INCS) -c $< -o $@
 
-.PHONY: all debug asan tsan test test-asan test-tsan clean distclean help \
-        _jemalloc_shim
+$(BUILD_DIR)/rel:
+	@mkdir -p $@
 
-# ══════════════════════════════════════════════════════════════════════════
-# Default: Release
-# ══════════════════════════════════════════════════════════════════════════
-all: $(BUILD_DIR)/release/example_hello
-	@echo "Build OK → $<"
-
-$(BUILD_DIR)/release/%.o: src/%.c $(LIB_HDRS)
-	@mkdir -p $(@D)
-	$(CC) $(RELEASE_CFLAGS) $(INCS) -c $< -o $@
-
-$(BUILD_DIR)/release/libhttpserver.a: \
-        $(patsubst src/%.c,$(BUILD_DIR)/release/%.o,$(LIB_SRCS))
+$(BUILD_DIR)/libhttpserver.a: $(LIB_OBJS_REL)
 	$(AR) rcs $@ $^
 
-$(BUILD_DIR)/release/example_hello: \
-        examples/main.c $(BUILD_DIR)/release/libhttpserver.a
-	$(CC) $(RELEASE_CFLAGS) $(INCS) \
-	    $< $(BUILD_DIR)/release/libhttpserver.a $(LIBS) -o $@
+# ── example binary ─────────────────────────────────────────────────────────
+$(EXAMPLE_BIN): $(BUILD_DIR)/libhttpserver.a $(EXAMPLE_SRC) | $(BUILD_DIR)
+	$(CC) $(BASE_CFLAGS) $(REL_FLAGS) $(INCS) \
+	    $(EXAMPLE_SRC) $< $(LIBS) -o $@
 
-# ══════════════════════════════════════════════════════════════════════════
-# Debug
-# ══════════════════════════════════════════════════════════════════════════
-debug: $(BUILD_DIR)/debug/example_hello
-	@echo "Debug build OK → $<"
+$(BUILD_DIR):
+	@mkdir -p $@
 
-$(BUILD_DIR)/debug/%.o: src/%.c $(LIB_HDRS)
-	@mkdir -p $(@D)
-	$(CC) $(DEBUG_CFLAGS) $(INCS) -c $< -o $@
+# ── debug ──────────────────────────────────────────────────────────────────
+.PHONY: debug
+debug: CFLAGS_VARIANT := $(DBG_FLAGS)
+debug: BUILD_SUBDIR := dbg
+debug: _build_example
 
-$(BUILD_DIR)/debug/libhttpserver.a: \
-        $(patsubst src/%.c,$(BUILD_DIR)/debug/%.o,$(LIB_SRCS))
-	$(AR) rcs $@ $^
+# ── asan ───────────────────────────────────────────────────────────────────
+.PHONY: asan
+asan: CFLAGS_VARIANT := $(ASAN_FLAGS)
+asan: BUILD_SUBDIR := asan
+asan: _build_example
 
-$(BUILD_DIR)/debug/example_hello: \
-        examples/main.c $(BUILD_DIR)/debug/libhttpserver.a
-	$(CC) $(DEBUG_CFLAGS) $(INCS) \
-	    $< $(BUILD_DIR)/debug/libhttpserver.a $(LIBS) -o $@
+# ── tsan ───────────────────────────────────────────────────────────────────
+.PHONY: tsan
+tsan: CFLAGS_VARIANT := $(TSAN_FLAGS)
+tsan: BUILD_SUBDIR := tsan
+tsan: _build_example
 
-# ══════════════════════════════════════════════════════════════════════════
-# ASAN
-# ══════════════════════════════════════════════════════════════════════════
-asan: $(BUILD_DIR)/asan/example_hello
-	@echo "ASAN build OK → $<"
+# ── helper to build variant example ───────────────────────────────────────
+.PHONY: _build_example
+_build_example: deps
+	@mkdir -p $(BUILD_DIR)/$(BUILD_SUBDIR)
+	$(CC) $(BASE_CFLAGS) $(CFLAGS_VARIANT) $(INCS) \
+	    $(LIB_SRCS) $(EXAMPLE_SRC) $(LIBS) \
+	    -o $(BUILD_DIR)/$(BUILD_SUBDIR)/httpserver_example
 
-$(BUILD_DIR)/asan/%.o: src/%.c $(LIB_HDRS)
-	@mkdir -p $(@D)
-	$(CC) $(ASAN_CFLAGS) $(INCS) -c $< -o $@
+# ── tests ──────────────────────────────────────────────────────────────────
+TEST_SRCS := \
+    tests/test_ring.c \
+    tests/test_queue.c \
+    tests/test_parser.c \
+    tests/test_lua_queue.c \
+    tests/test_lua_dir.c \
+    tests/test_integration.c
 
-$(BUILD_DIR)/asan/libhttpserver.a: \
-        $(patsubst src/%.c,$(BUILD_DIR)/asan/%.o,$(LIB_SRCS))
-	$(AR) rcs $@ $^
+TEST_BINS := $(patsubst tests/%.c,$(BUILD_DIR)/tests/%,$(TEST_SRCS))
 
-$(BUILD_DIR)/asan/example_hello: \
-        examples/main.c $(BUILD_DIR)/asan/libhttpserver.a
-	$(CC) $(ASAN_CFLAGS) $(INCS) \
-	    $< $(BUILD_DIR)/asan/libhttpserver.a $(LIBS) $(ASAN_LDFLAGS) -o $@
-
-# ══════════════════════════════════════════════════════════════════════════
-# TSan
-# ══════════════════════════════════════════════════════════════════════════
-tsan: $(BUILD_DIR)/tsan/example_hello
-	@echo "TSan build OK → $<"
-
-$(BUILD_DIR)/tsan/%.o: src/%.c $(LIB_HDRS)
-	@mkdir -p $(@D)
-	$(CC) $(TSAN_CFLAGS) $(INCS) -c $< -o $@
-
-$(BUILD_DIR)/tsan/libhttpserver.a: \
-        $(patsubst src/%.c,$(BUILD_DIR)/tsan/%.o,$(LIB_SRCS))
-	$(AR) rcs $@ $^
-
-$(BUILD_DIR)/tsan/example_hello: \
-        examples/main.c $(BUILD_DIR)/tsan/libhttpserver.a
-	$(CC) $(TSAN_CFLAGS) $(INCS) \
-	    $< $(BUILD_DIR)/tsan/libhttpserver.a $(LIBS) $(TSAN_LDFLAGS) -o $@
-
-# ══════════════════════════════════════════════════════════════════════════
-# jemalloc shim (in-memory header for standalone tests)
-# ══════════════════════════════════════════════════════════════════════════
-_jemalloc_shim: $(JEMALLOC_SHIM)
-
-$(JEMALLOC_SHIM):
-	@mkdir -p $(JEMALLOC_SHIM_DIR)
-	@printf '#pragma once\n#include <stdlib.h>\n#include <string.h>\n\
-static inline void *je_malloc(size_t s)           { return malloc(s); }\n\
-static inline void  je_free(void *p)              { free(p); }\n\
-static inline void *je_realloc(void *p, size_t s) { return realloc(p,s); }\n\
-static inline char *je_strdup(const char *s)      { return strdup(s); }\n\
-static inline void *je_calloc(size_t n, size_t s) { return calloc(n,s); }\n' \
-	    > $@
-
-# ══════════════════════════════════════════════════════════════════════════
-# Tests (Release mode, no sanitizer)
-# ══════════════════════════════════════════════════════════════════════════
-
-# test_ring – standalone, zero deps
-$(BUILD_DIR)/tests/test_ring: tests/test_ring.c src/hs_ring.h _jemalloc_shim
-	@mkdir -p $(@D)
-	$(CC) -std=c11 -Wall -Wextra -g \
-	    -DHS_RING_SIZE=64 \
-	    -D_GNU_SOURCE \
-	    -Isrc -I$(JEMALLOC_SHIM_DIR)/.. \
-	    $< -o $@
-
-# test_queue – MPSC/SPMC thread safety
-$(BUILD_DIR)/tests/test_queue: tests/test_queue.c src/hs_queue.h _jemalloc_shim
-	@mkdir -p $(@D)
-	$(CC) -std=c11 -Wall -Wextra -g \
-	    -D_GNU_SOURCE \
-	    -Isrc -I$(JEMALLOC_SHIM_DIR)/.. \
-	    $< -lpthread -o $@
-
-# test_parser – llhttp error paths (needs full library in debug mode)
-$(BUILD_DIR)/tests/test_parser: \
-        tests/test_parser.c $(BUILD_DIR)/debug/libhttpserver.a
-	@mkdir -p $(@D)
-	$(CC) $(DEBUG_CFLAGS) $(INCS) \
-	    $< $(BUILD_DIR)/debug/libhttpserver.a $(LIBS) $(TEST_LDFLAGS) -o $@
-
-# test_integration – end-to-end HTTP over TCP
-$(BUILD_DIR)/tests/test_integration: \
-        tests/test_integration.c $(BUILD_DIR)/debug/libhttpserver.a
-	@mkdir -p $(@D)
-	$(CC) $(DEBUG_CFLAGS) $(INCS) \
-	    $< $(BUILD_DIR)/debug/libhttpserver.a $(LIBS) $(TEST_LDFLAGS) -o $@
-
-TEST_BINS := \
-    $(BUILD_DIR)/tests/test_ring \
-    $(BUILD_DIR)/tests/test_queue \
-    $(BUILD_DIR)/tests/test_parser \
-    $(BUILD_DIR)/tests/test_integration
-
-test: $(TEST_BINS)
-	@echo ""
-	@echo "══════════════════════════════════════════════════════"
-	@echo "  Running test suite"
-	@echo "══════════════════════════════════════════════════════"
-	@fail=0; pass=0; \
+.PHONY: test
+test: deps $(TEST_BINS)
+	@echo "===== Running all tests ====="
+	@rc=0; \
 	for t in $(TEST_BINS); do \
-	    printf "  %-38s " "$$(basename $$t)"; \
-	    if "$$t" > $(BUILD_DIR)/_hs_test 2>&1; then \
-	        echo "PASS"; pass=$$((pass+1)); \
+	    printf "  %-40s " "$$t"; \
+	    if $$t > /tmp/hs_test_out.txt 2>&1; then \
+	        echo "PASS"; \
 	    else \
-	        echo "FAIL"; fail=$$((fail+1)); cat $(BUILD_DIR)/_hs_test; \
+	        echo "FAIL"; cat /tmp/hs_test_out.txt; rc=1; \
 	    fi; \
 	done; \
-	echo "══════════════════════════════════════════════════════"; \
-	echo "  passed=$$pass  failed=$$fail"; \
-	test $$fail -eq 0
+	if [ -f tests/test_regression.sh ]; then \
+	    printf "  %-40s " "tests/test_regression.sh (skipped: no server)"; echo "SKIP"; \
+	fi; \
+	exit $$rc
 
-# ══════════════════════════════════════════════════════════════════════════
-# ASAN test variants
-# ══════════════════════════════════════════════════════════════════════════
-$(BUILD_DIR)/tests/asan/test_ring: tests/test_ring.c src/hs_ring.h _jemalloc_shim
-	@mkdir -p $(@D)
-	$(CC) -std=c11 -Wall -g $(ASAN_CFLAGS) $(ASAN_LDFLAGS) \
-	    -DHS_RING_SIZE=64 -D_GNU_SOURCE \
-	    -Isrc -I$(JEMALLOC_SHIM_DIR)/.. $< -o $@
+$(BUILD_DIR)/tests/test_ring: tests/test_ring.c | $(BUILD_DIR)/tests
+	$(CC) $(BASE_CFLAGS) -UHS_RING_SIZE -DHS_RING_SIZE=64 $(REL_FLAGS) $(INCS) $< -o $@
 
-$(BUILD_DIR)/tests/asan/test_queue: tests/test_queue.c src/hs_queue.h _jemalloc_shim
-	@mkdir -p $(@D)
-	$(CC) -std=c11 -Wall -g $(ASAN_CFLAGS) $(ASAN_LDFLAGS) \
-	    -D_GNU_SOURCE \
-	    -Isrc -I$(JEMALLOC_SHIM_DIR)/.. $< -lpthread -o $@
+$(BUILD_DIR)/tests/%: tests/%.c $(LIB_SRCS) | $(BUILD_DIR)/tests
+	$(CC) $(BASE_CFLAGS) $(REL_FLAGS) $(INCS) \
+	    $< $(filter-out tests/%.c, $(LIB_SRCS)) $(LIBS) \
+	    $(TEST_LDFLAGS) -o $@
 
-$(BUILD_DIR)/tests/asan/test_parser: \
-        tests/test_parser.c $(BUILD_DIR)/asan/libhttpserver.a
-	@mkdir -p $(@D)
-	$(CC) $(ASAN_CFLAGS) $(ASAN_LDFLAGS) $(INCS) \
-	    $< $(BUILD_DIR)/asan/libhttpserver.a $(LIBS) -o $@
+$(BUILD_DIR)/tests:
+	@mkdir -p $@
 
-$(BUILD_DIR)/tests/asan/test_integration: \
-        tests/test_integration.c $(BUILD_DIR)/asan/libhttpserver.a
-	@mkdir -p $(@D)
-	$(CC) $(ASAN_CFLAGS) $(ASAN_LDFLAGS) $(INCS) \
-	    $< $(BUILD_DIR)/asan/libhttpserver.a $(LIBS) -o $@
-
-ASAN_TEST_BINS := \
-    $(BUILD_DIR)/tests/asan/test_ring \
-    $(BUILD_DIR)/tests/asan/test_queue \
-    $(BUILD_DIR)/tests/asan/test_parser \
-    $(BUILD_DIR)/tests/asan/test_integration
-
-# On macOS, LSAN is not supported (part of ASAN on Linux only)
-ifeq ($(OS),Darwin)
-ASAN_OPTS := ASAN_OPTIONS=detect_stack_use_after_return=1:halt_on_error=1
-UBSAN_OPTS := UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
-else
-ASAN_OPTS := ASAN_OPTIONS=detect_leaks=1:detect_stack_use_after_return=1:halt_on_error=1
-UBSAN_OPTS := UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
-endif
-
-test-asan: asan $(ASAN_TEST_BINS)
-	@echo ""
-	@echo "══════════════════════════════════════════════════════"
-	@echo "  Tests under ASAN+UBSan"
-	@echo "══════════════════════════════════════════════════════"
-	@fail=0; pass=0; \
-	for t in $(ASAN_TEST_BINS); do \
-	    printf "  %-38s " "$$(basename $$t)"; \
-	    if env $(ASAN_OPTS) $(UBSAN_OPTS) "$$t" > $(BUILD_DIR)/_hs_test 2>&1; then \
-	        echo "PASS"; pass=$$((pass+1)); \
+.PHONY: test-asan
+test-asan: deps
+	@mkdir -p $(BUILD_DIR)/tests-asan
+	@rc=0; \
+	for src in $(TEST_SRCS); do \
+	    name=$$(basename $$src .c); \
+	    bin=$(BUILD_DIR)/tests-asan/$$name; \
+	    if [ "$$name" = "test_ring" ]; then \
+	        $(CC) $(BASE_CFLAGS) -UHS_RING_SIZE -DHS_RING_SIZE=64 $(ASAN_FLAGS) $(INCS) $$src -o $$bin; \
 	    else \
-	        echo "FAIL"; fail=$$((fail+1)); cat $(BUILD_DIR)/_hs_test; \
+	        $(CC) $(BASE_CFLAGS) $(ASAN_FLAGS) $(INCS) \
+	            $$src $(filter-out tests/%.c, $(LIB_SRCS)) $(LIBS) \
+	            $(TEST_LDFLAGS) -o $$bin; \
 	    fi; \
-	done; \
-	echo "══════════════════════════════════════════════════════"; \
-	echo "  passed=$$pass  failed=$$fail"; \
-	test $$fail -eq 0
+	    printf "  [ASAN] %-35s " $$name; \
+	    if $$bin > /tmp/hs_asan_out.txt 2>&1; then \
+	        echo "PASS"; \
+	    else \
+	        echo "FAIL"; cat /tmp/hs_asan_out.txt; rc=1; \
+	    fi; \
+	done; exit $$rc
 
-# ══════════════════════════════════════════════════════════════════════════
-# TSan test variant (queue only – thread-safety focus)
-# ══════════════════════════════════════════════════════════════════════════
-$(BUILD_DIR)/tests/tsan/test_queue: tests/test_queue.c src/hs_queue.h _jemalloc_shim
-	@mkdir -p $(@D)
-	$(CC) -std=c11 -Wall -g $(TSAN_CFLAGS) $(TSAN_LDFLAGS) \
-	    -D_GNU_SOURCE \
-	    -Isrc -I$(JEMALLOC_SHIM_DIR)/.. $< -lpthread -o $@
+.PHONY: test-tsan
+test-tsan: deps
+	@mkdir -p $(BUILD_DIR)/tests-tsan
+	$(CC) $(BASE_CFLAGS) $(TSAN_FLAGS) $(INCS) \
+	    tests/test_queue.c $(LIB_SRCS) $(LIBS) \
+	    $(TEST_LDFLAGS) -o $(BUILD_DIR)/tests-tsan/test_queue
+	$(BUILD_DIR)/tests-tsan/test_queue
 
-test-tsan: $(BUILD_DIR)/tests/tsan/test_queue
-	@echo ""
-	@echo "══════════════════════════════════════════════════════"
-	@echo "  Queue test under ThreadSanitizer"
-	@echo "══════════════════════════════════════════════════════"
-	@TSAN_OPTIONS=halt_on_error=1 \
-	    $(BUILD_DIR)/tests/tsan/test_queue && echo "PASS" || echo "FAIL"
-
-# ══════════════════════════════════════════════════════════════════════════
+# ── clean ──────────────────────────────────────────────────────────────────
+.PHONY: clean
 clean:
 	rm -rf $(BUILD_DIR)
 
+.PHONY: distclean
 distclean:
-	rm -rf build
+	rm -rf build/
 
+# ── help ───────────────────────────────────────────────────────────────────
+.PHONY: help
 help:
-	@head -25 $(MAKEFILE_LIST)
+	@echo "httpserver-lite v0.4-lite build targets:"
+	@echo "  make [all]          Release build"
+	@echo "  make debug          Debug build (-g3 -O0)"
+	@echo "  make asan           AddressSanitizer + UBSan"
+	@echo "  make tsan           ThreadSanitizer"
+	@echo "  make test           Build & run all tests"
+	@echo "  make test-asan      Tests under ASAN+UBSan"
+	@echo "  make test-tsan      Queue test under TSan"
+	@echo "  make clean          Remove $(BUILD_DIR)"
+	@echo "  make distclean      Remove build/"
+	@echo ""
+	@echo "Knobs:"
+	@echo "  CC=clang"
+	@echo "  HS_RING_SIZE=16384  (default 8192)"
+	@echo "  HS_USE_JEMALLOC=1   (default 0 = system malloc)"
