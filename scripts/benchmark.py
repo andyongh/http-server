@@ -280,10 +280,9 @@ def main():
     
     modes_to_test = [
         {"name": "C Handler (Inline)", "workers": 0, "lua": None},
-        {"name": "C Handler (4 Workers)", "workers": 4, "lua": None},
-        {"name": "Lua Handler (Inline)", "workers": 0, "lua": "examples/handler.lua"},
-        {"name": "Lua Handler (4 Workers)", "workers": 4, "lua": "examples/handler.lua"}
+        {"name": "C Handler (4 Workers)", "workers": 4, "lua": None}
     ]
+
     
     isolation_passed = True
     for mode in modes_to_test:

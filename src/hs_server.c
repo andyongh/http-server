@@ -24,12 +24,13 @@
 
 #include "hs_server.h"
 #include "hs_pool.h"
-#include "hs_http.h"
 #include "hs_listener.h"
 #include "hs_reactor.h"
-#include "hs_lua_dir.h"
 #include "httpserver.h"
 #include "hs_log.h"
+
+
+
 
 /* ── hs_config_init ──────────────────────────────────────────────────────── */
 void hs_config_init(hs_config_t *cfg)
@@ -65,11 +66,6 @@ hs_server_t *hs_server_new(const hs_config_t *cfg)
 #endif
     }
     /* 0 → no pool at all (inline dispatch) */
-
-    /* ── validate Lua config ── */
-    if (cfg->lua_script && cfg->lua_dir) {
-        hs_log(HS_LOG_WARN, "[server] lua_script and lua_dir both set; lua_dir takes priority");
-    }
 
     /* ── create listeners ── */
     srv->nlisteners = 0;
@@ -110,10 +106,9 @@ hs_server_t *hs_server_new(const hs_config_t *cfg)
         if (!srv->pool) goto err;
     }
 
-    hs_log(HS_LOG_INFO, "[server] mode=SINGLE  workers=%d  lua=%s",
-           srv->config.num_threads,
-           cfg->lua_dir  ? cfg->lua_dir  :
-           cfg->lua_script ? cfg->lua_script : "(none)");
+    hs_log(HS_LOG_INFO, "[server] mode=SINGLE  workers=%d",
+           srv->config.num_threads);
+
 
     return srv;
 
@@ -129,14 +124,8 @@ int hs_server_run(hs_server_t *srv)
      * return values). */
     signal(SIGPIPE, SIG_IGN);
 
-    /* Start Lua directory watcher (if configured) in the reactor loop */
-    if (srv->config.lua_dir) {
-        if (hs_lua_dir_watch_start(srv->reactor, srv->config.lua_dir) < 0) {
-            hs_log(HS_LOG_WARN, "[server] lua_dir watch failed; continuing without hot-reload");
-        }
-    }
-
     int rc = hs_reactor_start(srv->reactor);
+
 
     /* Shutdown: drain and stop the worker pool */
     if (srv->pool) {

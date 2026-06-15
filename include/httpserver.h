@@ -126,16 +126,8 @@ typedef struct {
     /* ── C handler ───────────────────────────────────────────────────── */
     hs_handler_fn     handler;
     void             *handler_ud;
-
-    /* ── Lua handler (takes priority over C handler when set) ──────────
-     *   lua_script: path to a single Lua file
-     *   lua_dir:    path to a directory of Lua files (hot-reload enabled)
-     *               The directory must contain a file named "handler.lua"
-     *               which defines the global function `handle(req, res)`.
-     */
-    const char       *lua_script;    /* single Lua file (no hot-reload)  */
-    const char       *lua_dir;       /* Lua directory  (hot-reload)      */
 } hs_config_t;
+
 
 void hs_config_init(hs_config_t *cfg);   /* fill with sane defaults */
 

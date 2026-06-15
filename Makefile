@@ -1,5 +1,5 @@
 # =============================================================================
-# Makefile  –  httpserver-lite  (v0.4-lite)
+# Makefile  –  httpserver-lite  (v0.4-lite-nolua)
 #
 # Works on:  Linux (gcc/clang)  |  macOS / Apple Silicon (clang)
 #
@@ -18,14 +18,12 @@
 # Knobs (command-line overrides)
 #   CC=clang                  Compiler
 #   HS_RING_SIZE=16384        Ring buffer bytes (power-of-two, default 8192)
-#   HS_USE_JEMALLOC=1         Use jemalloc instead of system malloc
 #   HS_LOG_LEVEL=HS_LOG_INFO  Compile-time log level filter
 # =============================================================================
 
 CC            ?= cc
 AR            ?= ar
 HS_RING_SIZE  ?= 8192
-HS_USE_JEMALLOC ?= 0
 
 DEPS_BUILD   := build/deps
 BUILD_DIR    := build/out
@@ -35,14 +33,10 @@ OS := $(shell uname -s)
 
 ifeq ($(OS),Darwin)
     NPROC    := $(shell sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
-    EXTRA_LDFLAGS  := -Wl,-rpath,$(DEPS_BUILD)/luajit/lib
     TEST_LDFLAGS   :=
-    LUAJIT_ENV     := MACOSX_DEPLOYMENT_TARGET=15.0
 else
     NPROC    := $(shell nproc 2>/dev/null || echo 4)
-    EXTRA_LDFLAGS :=
     TEST_LDFLAGS  :=
-    LUAJIT_ENV     :=
 endif
 
 # ── include / library paths ────────────────────────────────────────────────
@@ -50,26 +44,15 @@ INCS := \
     -Iinclude \
     -Isrc \
     -Ideps/fsae \
-    -I$(DEPS_BUILD)/llhttp/include \
-    -I$(DEPS_BUILD)/luajit/include/luajit-2.1
+    -I$(DEPS_BUILD)/llhttp/include
 
 LIBS := \
     $(DEPS_BUILD)/llhttp/lib/libllhttp.a \
-    $(DEPS_BUILD)/luajit/lib/libluajit-5.1.a \
     -lpthread -lm
-
-# ── optional jemalloc ──────────────────────────────────────────────────────
-ifeq ($(HS_USE_JEMALLOC),1)
-    INCS += -I$(DEPS_BUILD)/jemalloc/include
-    LIBS += $(DEPS_BUILD)/jemalloc/lib/libjemalloc.a
-    JEMALLOC_FLAG := -DHS_USE_JEMALLOC
-else
-    JEMALLOC_FLAG :=
-endif
 
 # ── macOS: dl is part of libc, pthread already linked ─────────────────────
 ifeq ($(OS),Darwin)
-    LIBS += $(EXTRA_LDFLAGS)
+    LIBS +=
 else
     LIBS += -ldl
 endif
@@ -81,8 +64,7 @@ BASE_CFLAGS := \
     -Wno-unused-parameter \
     -D_GNU_SOURCE \
     -D_POSIX_C_SOURCE=200809L \
-    -DHS_RING_SIZE=$(HS_RING_SIZE) \
-    $(JEMALLOC_FLAG)
+    -DHS_RING_SIZE=$(HS_RING_SIZE)
 
 # ── variant flags ──────────────────────────────────────────────────────────
 REL_FLAGS  := -O2
@@ -97,8 +79,6 @@ LIB_SRCS := \
     src/hs_http.c \
     src/hs_listener.c \
     src/hs_log.c \
-    src/hs_lua.c \
-    src/hs_lua_dir.c \
     src/hs_pool.c \
     src/hs_reactor.c \
     src/hs_server.c
@@ -112,12 +92,7 @@ all: deps $(EXAMPLE_BIN)
 
 # ── build deps ─────────────────────────────────────────────────────────────
 .PHONY: deps
-deps: $(DEPS_BUILD)/llhttp/lib/libllhttp.a \
-      $(DEPS_BUILD)/luajit/lib/libluajit-5.1.a
-
-ifeq ($(HS_USE_JEMALLOC),1)
-deps: $(DEPS_BUILD)/jemalloc/lib/libjemalloc.a
-endif
+deps: $(DEPS_BUILD)/llhttp/lib/libllhttp.a
 
 $(DEPS_BUILD)/llhttp/lib/libllhttp.a:
 	@echo "[deps] building llhttp..."
@@ -125,25 +100,6 @@ $(DEPS_BUILD)/llhttp/lib/libllhttp.a:
 	cd deps/llhttp && npm install && npm run build
 	$(MAKE) -C deps/llhttp install PREFIX=$(abspath $(DEPS_BUILD)/llhttp) \
 	    CLANG=$(CC) CC=$(CC)
-
-$(DEPS_BUILD)/luajit/lib/libluajit-5.1.a:
-	@echo "[deps] building LuaJIT..."
-	@mkdir -p $(DEPS_BUILD)/luajit
-	$(LUAJIT_ENV) $(MAKE) -C deps/luajit install \
-	    PREFIX=$(abspath $(DEPS_BUILD)/luajit) \
-	    BUILDMODE=static \
-	    CC=$(CC) \
-	    XCFLAGS="-DLUAJIT_ENABLE_GC64" \
-	    -j$(NPROC)
-
-$(DEPS_BUILD)/jemalloc/lib/libjemalloc.a:
-	@echo "[deps] building jemalloc..."
-	@mkdir -p $(DEPS_BUILD)/jemalloc
-	cd deps/jemalloc && autoconf && \
-	    ./configure --prefix=$(abspath $(DEPS_BUILD)/jemalloc) \
-	                --disable-debug --with-jemalloc-prefix=je_ \
-	                --disable-shared && \
-	    $(MAKE) -j$(NPROC) && $(MAKE) install
 
 # ── library archive ────────────────────────────────────────────────────────
 LIB_OBJS_REL := $(patsubst src/%.c,$(BUILD_DIR)/rel/%.o,$(LIB_SRCS))
@@ -196,8 +152,6 @@ TEST_SRCS := \
     tests/test_ring.c \
     tests/test_queue.c \
     tests/test_parser.c \
-    tests/test_lua_queue.c \
-    tests/test_lua_dir.c \
     tests/test_integration.c
 
 TEST_BINS := $(patsubst tests/%.c,$(BUILD_DIR)/tests/%,$(TEST_SRCS))
@@ -272,7 +226,7 @@ distclean:
 # ── help ───────────────────────────────────────────────────────────────────
 .PHONY: help
 help:
-	@echo "httpserver-lite v0.4-lite build targets:"
+	@echo "httpserver-lite v0.4-lite-nolua build targets:"
 	@echo "  make [all]          Release build"
 	@echo "  make debug          Debug build (-g3 -O0)"
 	@echo "  make asan           AddressSanitizer + UBSan"
@@ -286,4 +240,3 @@ help:
 	@echo "Knobs:"
 	@echo "  CC=clang"
 	@echo "  HS_RING_SIZE=16384  (default 8192)"
-	@echo "  HS_USE_JEMALLOC=1   (default 0 = system malloc)"

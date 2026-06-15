@@ -79,9 +79,8 @@ static int hs_accept(int lfd) {
 #include "hs_server.h"
 #include "hs_http.h"
 #include "hs_pool.h"
-#include "hs_lua.h"
-#include "hs_lua_dir.h"
 #include "hs_log.h"
+
 
 /* ── socket helpers ─────────────────────────────────────────────────────── */
 static void set_nonblocking(int fd)
@@ -354,15 +353,8 @@ void hs_res_send_inline(hs_response_t *res)
     aeCreateFileEvent(r->ae, conn->fd, AE_WRITABLE, hs_write_cb, conn);
 }
 
-static hs_dispatch_mode_t hs_check_dispatch_mode(hs_server_t *srv, hs_conn_t *conn, hs_lua_state_t *lstate, hs_response_t *res)
+static hs_dispatch_mode_t hs_check_dispatch_mode(hs_server_t *srv, hs_conn_t *conn, hs_response_t *res)
 {
-    /* Lua handler takes priority */
-    if (lstate && (srv->config.lua_script || srv->config.lua_dir)) {
-        int mode = hs_lua_call_handler(lstate, conn, res);
-        if (mode < 0) return HS_DISPATCH_INLINE; /* error path: run inline to return 500 */
-        return (hs_dispatch_mode_t)mode;
-    }
-
     if (srv->config.handler) {
         return srv->config.handler((hs_request_t *)conn, res, srv->config.handler_ud);
     }
@@ -388,7 +380,7 @@ __attribute__((weak)) void hs_on_request_complete(hs_conn_t *conn)
     /* No pool → inline dispatch always */
     if (!srv->pool) {
         conn->in_worker = 0;
-        hs_process_work(srv, conn, r->lstate);
+        hs_process_work(srv, conn);
         return;
     }
 
@@ -400,15 +392,7 @@ __attribute__((weak)) void hs_on_request_complete(hs_conn_t *conn)
         return;
     }
 
-    /* Check reload for reactor's lstate */
-    if (r->lstate && srv->config.lua_dir &&
-        hs_lua_dir_needs_reload(srv->config.lua_dir)) {
-        hs_lua_state_free(r->lstate);
-        const char *new_path = hs_lua_dir_main_script(srv->config.lua_dir);
-        r->lstate = new_path ? hs_lua_state_new(new_path) : NULL;
-    }
-
-    hs_dispatch_mode_t mode = hs_check_dispatch_mode(srv, conn, r->lstate, res);
+    hs_dispatch_mode_t mode = hs_check_dispatch_mode(srv, conn, res);
 
     if (mode == HS_DISPATCH_INLINE) {
         /* Inline. The C/Lua handler already called hs_res_send(res) internally,
@@ -438,8 +422,7 @@ __attribute__((weak)) void hs_on_request_complete(hs_conn_t *conn)
  *    Reactor thread (INLINE / no pool): same, but hs_res_send calls
  *    hs_res_send_inline() which directly schedules the write event.
  * ══════════════════════════════════════════════════════════════════════════ */
-void hs_process_work(hs_server_t *srv, hs_conn_t *conn,
-                     struct hs_lua_state *lstate)
+void hs_process_work(hs_server_t *srv, hs_conn_t *conn)
 {
     hs_response_t *res = hs_http_response_new(conn);
     if (!res) {
@@ -459,27 +442,9 @@ void hs_process_work(hs_server_t *srv, hs_conn_t *conn,
         conn->in_worker = 0;
     }
 
-    int dispatched = 0;
-
-    /* Lua handler takes priority */
-    if (lstate && (srv->config.lua_script || srv->config.lua_dir)) {
-        int rc = hs_lua_call_handler(lstate, conn, res);
-        if (rc >= 0) {
-            dispatched = 1;
-        } else {
-            hs_res_status(res, 500);
-            hs_res_body_str(res, "Internal Server Error");
-            hs_res_send(res);
-            dispatched = 1;
-        }
-    }
-
-    if (!dispatched && srv->config.handler) {
+    if (srv->config.handler) {
         (void)srv->config.handler((hs_request_t *)conn, res, srv->config.handler_ud);
-        dispatched = 1;
-    }
-
-    if (!dispatched) {
+    } else {
         hs_res_status(res, 404);
         hs_res_body_str(res, "Not Found");
         hs_res_send(res);
@@ -516,15 +481,7 @@ __attribute__((weak)) void hs_res_send(hs_response_t *res)
     }
 }
 
-static long long reactor_tick_cb(struct aeEventLoop *el, long long id, void *clientData)
-{
-    (void)el; (void)id;
-    hs_reactor_t *r = (hs_reactor_t *)clientData;
-    if (r->lstate) {
-        hs_lua_state_tick(r->lstate);
-    }
-    return 10; /* run again in 10ms */
-}
+
 
 hs_reactor_t *hs_reactor_new(hs_server_t *srv)
 {
@@ -563,20 +520,6 @@ hs_reactor_t *hs_reactor_new(hs_server_t *srv)
 
     int cap = srv->config.conn_pool_cap > 0 ? srv->config.conn_pool_cap : 1024;
     if (hs_conn_pool_init(&r->conn_pool, cap) < 0) goto fail;
-
-    /* Initialize Lua state for inline dispatch */
-    const char *lua_path = srv->config.lua_dir
-        ? hs_lua_dir_main_script(srv->config.lua_dir)
-        : srv->config.lua_script;
-
-    if (lua_path) {
-        r->lstate = hs_lua_state_new(lua_path);
-        if (!r->lstate) {
-            hs_log(HS_LOG_ERROR, "reactor: Lua init failed");
-        } else {
-            aeCreateTimeEvent(r->ae, 10, reactor_tick_cb, r, NULL);
-        }
-    }
 
     return r;
 
@@ -619,9 +562,6 @@ void hs_reactor_stop(hs_reactor_t *r)
 void hs_reactor_free(hs_reactor_t *r)
 {
     if (!r) return;
-    if (r->lstate) {
-        hs_lua_state_free(r->lstate);
-    }
     if (r->ae)       aeDeleteEventLoop(r->ae);
     if (r->resp_efd  >= 0) close(r->resp_efd);
 #ifndef __linux__

@@ -38,7 +38,7 @@
 
 struct hs_server;
 struct hs_pool;
-struct hs_lua_state;
+
 
 /* ── per-reactor connection pool (IO-thread-owned, lock-free) ──────────── */
 typedef struct {
@@ -68,7 +68,6 @@ typedef struct hs_reactor {
     /* Connection pool – IO-thread-owned, no locking */
     hs_conn_pool_t    conn_pool;
 
-    struct hs_lua_state *lstate;  /* Lua state for inline execution (ticked by event loop) */
     struct hs_server *srv;        /* back-pointer to the server config etc. */
 } hs_reactor_t;
 
@@ -85,5 +84,4 @@ void hs_accept_cb(aeEventLoop *el, int fd, void *clientData, int mask);
 
 /* ── cross-unit internal API ─────────────────────────────────────────────── */
 void hs_on_request_complete(hs_conn_t *conn);
-void hs_process_work(struct hs_server *srv, hs_conn_t *conn,
-                     struct hs_lua_state *lstate);
+void hs_process_work(struct hs_server *srv, hs_conn_t *conn);

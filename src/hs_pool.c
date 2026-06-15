@@ -16,8 +16,6 @@
 #include "hs_alloc.h"
 #include "hs_pool.h"
 #include "hs_reactor.h"
-#include "hs_lua.h"
-#include "hs_lua_dir.h"
 #include "hs_server.h"
 #include "hs_log.h"
 
@@ -25,7 +23,6 @@ typedef struct {
     int               id;
     pthread_t         tid;
     struct hs_server *srv;
-    hs_lua_state_t   *lstate;
 } hs_worker_t;
 
 struct hs_pool {
@@ -34,40 +31,22 @@ struct hs_pool {
     hs_worker_t *workers;
 };
 
+
 static void *worker_fn(void *arg)
 {
     hs_worker_t  *w   = (hs_worker_t *)arg;
     hs_server_t  *srv = w->srv;
 
-    /* Prefer lua_dir, fall back to lua_script */
-    const char *lua_path = srv->config.lua_dir
-        ? hs_lua_dir_main_script(srv->config.lua_dir)
-        : srv->config.lua_script;
-
-    if (lua_path) {
-        w->lstate = hs_lua_state_new(lua_path);
-        if (!w->lstate)
-            hs_log(HS_LOG_ERROR, "worker %d: Lua init failed", w->id);
-    }
-
     for (;;) {
         hs_conn_t *conn = (hs_conn_t *)hs_spmc_pop(&srv->pool->work_q);
         if (!conn) break;
 
-        /* Check if Lua dir has changed; if so, reload the Lua state */
-        if (w->lstate && srv->config.lua_dir &&
-            hs_lua_dir_needs_reload(srv->config.lua_dir)) {
-            hs_lua_state_free(w->lstate);
-            const char *new_path = hs_lua_dir_main_script(srv->config.lua_dir);
-            w->lstate = new_path ? hs_lua_state_new(new_path) : NULL;
-        }
-
-        hs_process_work(srv, conn, w->lstate);
+        hs_process_work(srv, conn);
     }
 
-    if (w->lstate) { hs_lua_state_free(w->lstate); w->lstate = NULL; }
     return NULL;
 }
+
 
 hs_pool_t *hs_pool_new(int nthreads, struct hs_server *srv)
 {

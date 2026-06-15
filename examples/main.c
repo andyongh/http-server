@@ -132,20 +132,9 @@ int main(void)
     const char *workers_str = getenv("HS_WORKERS");
     cfg.num_threads = workers_str ? atoi(workers_str) : 0;
 
-    /* ── Lua handler (lua_dir overrides lua_script) ── */
-    const char *lua_dir    = getenv("HS_LUA_DIR");
-    const char *lua_script = getenv("HS_LUA");
+    cfg.handler = handle;
+    printf("[main] C handler (INLINE dispatch)\n");
 
-    if (lua_dir && *lua_dir) {
-        cfg.lua_dir = lua_dir;
-        printf("[main] Lua dir: %s (hot-reload enabled)\n", lua_dir);
-    } else if (lua_script && *lua_script) {
-        cfg.lua_script = lua_script;
-        printf("[main] Lua script: %s\n", lua_script);
-    } else {
-        cfg.handler = handle;
-        printf("[main] C handler (INLINE dispatch)\n");
-    }
 
     printf("[main] listening on %s:%d  workers=%d\n",
            cfg.host, cfg.port, cfg.num_threads);
