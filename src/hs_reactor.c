@@ -509,15 +509,19 @@ __attribute__((weak)) void hs_res_send(hs_response_t *res)
     hs_conn_t    *conn = res->conn;
     hs_reactor_t *r    = conn->reactor;   /* immutable: safe to read */
 
-    res->mpsc_node.payload = res;
-    hs_mpsc_push(&r->resp_queue, &res->mpsc_node);   /* lock-free push   */
+    if (!conn->in_worker) {
+        hs_res_send_inline(res);
+    } else {
+        res->mpsc_node.payload = res;
+        hs_mpsc_push(&r->resp_queue, &res->mpsc_node);   /* lock-free push   */
 
-    /* Wake the IO thread */
+        /* Wake the IO thread */
 #ifdef __linux__
-    hs_efd_signal(r->resp_efd, r->resp_efd);
+        hs_efd_signal(r->resp_efd, r->resp_efd);
 #else
-    hs_efd_signal(r->resp_efd, r->resp_efd_w);
+        hs_efd_signal(r->resp_efd, r->resp_efd_w);
 #endif
+    }
 }
 
 static long long reactor_tick_cb(struct aeEventLoop *el, long long id, void *clientData)
@@ -541,22 +545,29 @@ hs_reactor_t *hs_reactor_new(hs_server_t *srv)
     r->ae = aeCreateEventLoop(65536);
     if (!r->ae) goto fail;
 
-#ifdef __linux__
-    r->resp_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-#else
-    {
-        int pfd[2];
-        if (hs_pipe_pair(pfd) < 0) goto fail;
-        r->resp_efd   = pfd[0];   /* read end  */
-        r->resp_efd_w = pfd[1];   /* write end */
-    }
+    r->resp_efd = -1;
+#ifndef __linux__
+    r->resp_efd_w = -1;
 #endif
-    if (r->resp_efd < 0) goto fail;
 
-    hs_mpsc_init(&r->resp_queue);
+    if (srv->config.num_threads > 0) {
+#ifdef __linux__
+        r->resp_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+#else
+        {
+            int pfd[2];
+            if (hs_pipe_pair(pfd) < 0) goto fail;
+            r->resp_efd   = pfd[0];   /* read end  */
+            r->resp_efd_w = pfd[1];   /* write end */
+        }
+#endif
+        if (r->resp_efd < 0) goto fail;
 
-    if (aeCreateFileEvent(r->ae, r->resp_efd, AE_READABLE,
-                          resp_efd_cb, r) == AE_ERR) goto fail;
+        hs_mpsc_init(&r->resp_queue);
+
+        if (aeCreateFileEvent(r->ae, r->resp_efd, AE_READABLE,
+                              resp_efd_cb, r) == AE_ERR) goto fail;
+    }
 
     int cap = srv->config.conn_pool_cap > 0 ? srv->config.conn_pool_cap : 1024;
     if (hs_conn_pool_init(&r->conn_pool, cap) < 0) goto fail;
@@ -603,12 +614,14 @@ void hs_reactor_stop(hs_reactor_t *r)
 {
     if (!r || !r->ae) return;
     aeStop(r->ae);
-    /* Wake the event loop from poll */
+    /* Wake the event loop from poll if efd was initialized */
+    if (r->resp_efd >= 0) {
 #ifdef __linux__
-    hs_efd_signal(r->resp_efd, r->resp_efd);
+        hs_efd_signal(r->resp_efd, r->resp_efd);
 #else
-    hs_efd_signal(r->resp_efd, r->resp_efd_w);
+        hs_efd_signal(r->resp_efd, r->resp_efd_w);
 #endif
+    }
 }
 
 void hs_reactor_free(hs_reactor_t *r)
