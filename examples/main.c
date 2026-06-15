@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <signal.h>
 #include "httpserver.h"
 
@@ -47,7 +48,7 @@ static hs_dispatch_mode_t handle(hs_request_t *req, hs_response_t *res,
     (void)ud;
     const char *url    = hs_req_url(req);
     const char *method = hs_req_method_str(req);
-    printf("[%s] %s\n", method, url);
+    hs_log(HS_LOG_INFO, "[%s] %s", method, url);
 
     if (strcmp(url, "/") == 0) {
         hs_res_status(res, 200);
@@ -93,8 +94,20 @@ int main(void)
     signal(SIGINT,  on_signal);
     signal(SIGTERM, on_signal);
 
+    /* Parse and set minimum log level */
+    const char *log_lvl_str = getenv("HS_LOG_LEVEL");
+    if (log_lvl_str) {
+        if (strcasecmp(log_lvl_str, "DEBUG") == 0) hs_log_set_level(HS_LOG_DEBUG);
+        else if (strcasecmp(log_lvl_str, "INFO") == 0) hs_log_set_level(HS_LOG_INFO);
+        else if (strcasecmp(log_lvl_str, "WARN") == 0) hs_log_set_level(HS_LOG_WARN);
+        else if (strcasecmp(log_lvl_str, "ERROR") == 0) hs_log_set_level(HS_LOG_ERROR);
+        else if (strcasecmp(log_lvl_str, "FATAL") == 0) hs_log_set_level(HS_LOG_FATAL);
+        else if (strcasecmp(log_lvl_str, "OFF") == 0) hs_log_set_level(HS_LOG_OFF);
+    }
+
     hs_config_t cfg;
     hs_config_init(&cfg);
+
 
     /* ── listen: TCP + optional UDS ── */
     const char *uds = getenv("HS_UDS");
