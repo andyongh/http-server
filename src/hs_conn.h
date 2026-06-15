@@ -30,6 +30,7 @@
 #include "hs_ring.h"
 #include "hs_buf.h"
 #include "hs_queue.h"
+#include "hs_http.h"
 
 /* ── llhttp parse outcome ──────────────────────────────────────────────── */
 typedef enum {
@@ -122,6 +123,8 @@ typedef struct hs_conn {
 
     /* MPSC node for the response queue (worker → IO thread path) */
     hs_mpsc_node_t    resp_node;
+
+    hs_response_t     res;
 
     /* Index in the owning reactor's connection pool */
     int               in_worker;

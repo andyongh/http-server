@@ -15,7 +15,6 @@ struct hs_response {
     int      nheaders;
     hs_buf_t body;
     struct hs_conn *conn;
-    hs_mpsc_node_t  mpsc_node;
 };
 
 hs_response_t *hs_http_response_new(struct hs_conn *conn);

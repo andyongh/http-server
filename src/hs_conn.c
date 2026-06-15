@@ -329,6 +329,12 @@ void hs_conn_init(hs_conn_t *conn, int fd, struct hs_reactor *reactor)
     hs_ring_init(&conn->ring);
     memset(&conn->req, 0, sizeof(conn->req));
     parser_init(conn);
+
+    /* Initialize embedded response */
+    conn->res.status = 200;
+    conn->res.conn = conn;
+    conn->res.nheaders = 0;
+    hs_buf_init(&conn->res.body, 256);
 }
 
 void hs_conn_reset_req(hs_conn_t *conn)
@@ -341,6 +347,15 @@ void hs_conn_reset_req(hs_conn_t *conn)
     hs_free(r->overflow);
     memset(r, 0, sizeof(*r));
     llhttp_reset(&conn->parser);
+
+    /* Reset embedded response but keep allocated body capacity */
+    for (int i = 0; i < conn->res.nheaders; i++) {
+        hs_free(conn->res.headers[i].name);
+        hs_free(conn->res.headers[i].value);
+    }
+    conn->res.nheaders = 0;
+    conn->res.status = 200;
+    hs_buf_reset(&conn->res.body);
 }
 
 void hs_conn_cleanup(hs_conn_t *conn)
@@ -352,6 +367,13 @@ void hs_conn_cleanup(hs_conn_t *conn)
     }
     hs_free(r->overflow);
     hs_buf_free(&conn->wbuf);
+
+    /* Cleanup embedded response resources */
+    for (int i = 0; i < conn->res.nheaders; i++) {
+        hs_free(conn->res.headers[i].name);
+        hs_free(conn->res.headers[i].value);
+    }
+    hs_buf_free(&conn->res.body);
 }
 
 /*

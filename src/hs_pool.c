@@ -51,8 +51,8 @@ static void *worker_fn(void *arg)
     }
 
     for (;;) {
-        hs_work_t *work = (hs_work_t *)hs_spmc_pop(&srv->pool->work_q);
-        if (!work) break;
+        hs_conn_t *conn = (hs_conn_t *)hs_spmc_pop(&srv->pool->work_q);
+        if (!conn) break;
 
         /* Check if Lua dir has changed; if so, reload the Lua state */
         if (w->lstate && srv->config.lua_dir &&
@@ -62,8 +62,7 @@ static void *worker_fn(void *arg)
             w->lstate = new_path ? hs_lua_state_new(new_path) : NULL;
         }
 
-        hs_process_work(srv, work->conn, w->lstate);
-        hs_free(work);
+        hs_process_work(srv, conn, w->lstate);
     }
 
     if (w->lstate) { hs_lua_state_free(w->lstate); w->lstate = NULL; }
@@ -94,9 +93,9 @@ hs_pool_t *hs_pool_new(int nthreads, struct hs_server *srv)
     return p;
 }
 
-int hs_pool_submit(hs_pool_t *p, hs_work_t *work)
+int hs_pool_submit(hs_pool_t *p, hs_conn_t *conn)
 {
-    return hs_spmc_push(&p->work_q, work);
+    return hs_spmc_push(&p->work_q, conn);
 }
 
 void hs_pool_shutdown(hs_pool_t *p)

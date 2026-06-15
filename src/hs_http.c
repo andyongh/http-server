@@ -39,11 +39,15 @@ const char *hs_http_status_str(int c)
 
 hs_response_t *hs_http_response_new(struct hs_conn *conn)
 {
-    hs_response_t *r = (hs_response_t *)hs_calloc(1, sizeof(*r));
-    if (!r) return NULL;
+    hs_response_t *r = &conn->res;
     r->status = 200;
     r->conn   = conn;
-    hs_buf_init(&r->body, 256);
+    for (int i = 0; i < r->nheaders; i++) {
+        hs_free(r->headers[i].name);
+        hs_free(r->headers[i].value);
+    }
+    r->nheaders = 0;
+    hs_buf_reset(&r->body);
     return r;
 }
 
@@ -54,8 +58,8 @@ void hs_http_response_free(hs_response_t *r)
         hs_free(r->headers[i].name);
         hs_free(r->headers[i].value);
     }
-    hs_buf_free(&r->body);
-    hs_free(r);
+    r->nheaders = 0;
+    hs_buf_reset(&r->body);
 }
 
 /* ── public builder API (called from worker threads or reactor) ──────────── */

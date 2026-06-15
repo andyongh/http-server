@@ -306,18 +306,17 @@ static void resp_efd_cb(aeEventLoop *el, int fd, void *clientData, int mask)
         hs_mpsc_node_t *node = hs_mpsc_pop(&r->resp_queue);
         if (!node) break;
 
-        hs_response_t *res  = (hs_response_t *)node->payload;
-        hs_log(HS_LOG_DEBUG, "response fd=%d", res->conn->fd);
-        hs_conn_t     *conn = res->conn;
+        hs_conn_t *conn = (hs_conn_t *)node->payload;
+        hs_log(HS_LOG_DEBUG, "response fd=%d", conn->fd);
 
         if (conn->state == HS_CONN_CLOSING) {
-            hs_http_response_free(res);
+            hs_http_response_free(&conn->res);
             conn_close(r, conn);
             continue;
         }
 
-        hs_http_response_serialise(res);
-        hs_http_response_free(res);
+        hs_http_response_serialise(&conn->res);
+        hs_http_response_free(&conn->res);
 
         conn->wbuf_sent = 0;
         conn->state     = HS_CONN_WRITING;
@@ -418,17 +417,10 @@ __attribute__((weak)) void hs_on_request_complete(hs_conn_t *conn)
         /* Worker. Free the temporary response and delegate to worker pool. */
         hs_http_response_free(res);
 
-        hs_work_t *work = (hs_work_t *)hs_malloc(sizeof(hs_work_t));
-        if (!work) {
-            conn_send_error_inline(r, conn, 500, "Internal Server Error");
-            return;
-        }
-        work->conn  = conn;
         conn->state = HS_CONN_INFLIGHT;
         aeDeleteFileEvent(r->ae, conn->fd, AE_READABLE);
 
-        if (hs_pool_submit(srv->pool, work) != 0) {
-            hs_free(work);
+        if (hs_pool_submit(srv->pool, conn) != 0) {
             conn->state = HS_CONN_READING;
             aeCreateFileEvent(r->ae, conn->fd, AE_READABLE, hs_read_cb, conn);
             conn_send_error_inline(r, conn, 503, "Service Unavailable");
@@ -512,8 +504,8 @@ __attribute__((weak)) void hs_res_send(hs_response_t *res)
     if (!conn->in_worker) {
         hs_res_send_inline(res);
     } else {
-        res->mpsc_node.payload = res;
-        hs_mpsc_push(&r->resp_queue, &res->mpsc_node);   /* lock-free push   */
+        conn->resp_node.payload = conn;
+        hs_mpsc_push(&r->resp_queue, &conn->resp_node);   /* lock-free push   */
 
         /* Wake the IO thread */
 #ifdef __linux__
